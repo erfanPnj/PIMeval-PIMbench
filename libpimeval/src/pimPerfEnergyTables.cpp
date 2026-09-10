@@ -68,6 +68,7 @@ const std::unordered_map<PimDeviceEnum, std::unordered_map<PimDataType,
 
                                                 // OA_REDUCE: 4-level reduction tree (Popcount equivalent + Shift & Add)
                                                 {PimCmdEnum::OA_REDUCE, {144, 72, 380}},
+
                                                 {PimCmdEnum::ABS, {17, 16, 66}},
                                                 //{ PimCmdEnum::POPCOUNT,     {    0,    0,    0 } },
                                                 {PimCmdEnum::ADD, {32, 16, 49}},
@@ -115,6 +116,7 @@ const std::unordered_map<PimDeviceEnum, std::unordered_map<PimDataType,
 
                                                 // OA_REDUCE: 4-level reduction tree (Popcount equivalent + Shift & Add)
                                                 {PimCmdEnum::OA_REDUCE, {144, 72, 380}},
+                                                {PimCmdEnum::COND_COPY, {64, 32, 64}},
                                                 {PimCmdEnum::ABS, {33, 32, 130}},
                                                 {PimCmdEnum::POPCOUNT, {114, 114, 218}},
                                                 {PimCmdEnum::ADD, {64, 32, 97}},

@@ -118,6 +118,24 @@ pimPerfEnergyBitSerial::getPerfEnergyBitSerial(PimDeviceEnum deviceType, PimCmdE
         totalOp += objSrc1.getNumElements();
         ok = true;
         break;
+      case PimCmdEnum::COND_COPY:
+      {
+        // bit-serial approach for conditional copy (dest = cond ? src : dest)
+        // 1 row read for condition, 2 row reads (src, dest) and 1 row write (dest) per bit
+        unsigned numR = 1 + 2 * bitsPerElement;
+        unsigned numW = bitsPerElement;
+        unsigned numL = 1 + 2 * bitsPerElement; // mov cond, then (mov src, sel) per bit
+
+        msRead += numR * m_tR;
+        msWrite += numW * m_tW;
+        msLogic += numL * m_tL;
+        totalOp += objSrc1.getNumElements();
+        msRuntime += msRead + msWrite + msLogic;
+        mjEnergy += ((m_eL * numL * objSrc1.getMaxElementsPerRegion()) + (m_eAP * numR + m_eAP * numW)) * numCores;
+        mjEnergy += m_pBChip * m_numChipsPerRank * m_numRanks * msRuntime;
+        ok = true;
+        break;
+      }
       case PimCmdEnum::COND_BROADCAST:
       {
         // bit-serial approach:
