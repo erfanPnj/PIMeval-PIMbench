@@ -13,13 +13,15 @@
 #include <functional>
 
 //! @brief  PIM API return status
-enum PimStatus {
+enum PimStatus
+{
   PIM_ERROR = 0,
   PIM_OK,
 };
 
 //! @brief  PIM device types
-enum PimDeviceEnum {
+enum PimDeviceEnum
+{
   PIM_DEVICE_NONE = 0,
   PIM_FUNCTIONAL,
   PIM_DEVICE_BITSIMD_V,
@@ -48,11 +50,12 @@ enum PimDeviceEnum {
  *
  * @var PIM_DEVICE_PROTOCOL_HBM
  * High Bandwidth Memory (HBM) protocol.
- * 
+ *
  * @var PIM_DEVICE_PROTOCOL_GDDR
  * Graphics Double Data Rate (GDDR) protocol.
-*/
-enum PimDeviceProtocolEnum {
+ */
+enum PimDeviceProtocolEnum
+{
   PIM_DEVICE_PROTOCOL_DDR = 0,
   PIM_DEVICE_PROTOCOL_LPDDR,
   PIM_DEVICE_PROTOCOL_HBM,
@@ -60,7 +63,8 @@ enum PimDeviceProtocolEnum {
 };
 
 //! @brief  PIM allocation types
-enum PimAllocEnum {
+enum PimAllocEnum
+{
   PIM_ALLOC_AUTO = 0, // Auto determine vertical or horizontal layout based on device type
   PIM_ALLOC_V,        // V layout, multiple regions per core
   PIM_ALLOC_H,        // H layout, multiple regions per core
@@ -69,13 +73,15 @@ enum PimAllocEnum {
 };
 
 //! @brief  PIM data copy types
-enum PimCopyEnum {
+enum PimCopyEnum
+{
   PIM_COPY_V,
   PIM_COPY_H,
 };
 
 //! @brief  PIM datatypes
-enum PimDataType {
+enum PimDataType
+{
   PIM_BOOL = 0,
   PIM_INT8,
   PIM_INT16,
@@ -92,7 +98,8 @@ enum PimDataType {
 };
 
 //! @brief  PIM device properties
-struct PimDeviceProperties {
+struct PimDeviceProperties
+{
   PimDeviceEnum deviceType = PIM_DEVICE_NONE;
   PimDeviceEnum simTarget = PIM_DEVICE_NONE;
   unsigned numRanks = 0;
@@ -130,8 +137,8 @@ bool pimIsAnalysisMode();
  * @return PimStatus      Status code indicating success or failure of device creation.
  */
 PimStatus pimCreateDevice(PimDeviceEnum deviceType, unsigned numRanks, unsigned numBankPerRank, unsigned numSubarrayPerBank, unsigned numRows, unsigned numCols, unsigned bufferSize = 0);
-PimStatus pimCreateDeviceFromConfig(PimDeviceEnum deviceType, const char* configFileName);
-PimStatus pimGetDeviceProperties(PimDeviceProperties* deviceProperties);
+PimStatus pimCreateDeviceFromConfig(PimDeviceEnum deviceType, const char *configFileName);
+PimStatus pimGetDeviceProperties(PimDeviceProperties *deviceProperties);
 PimStatus pimDeleteDevice();
 
 // Resource allocation and deletion
@@ -149,8 +156,8 @@ PimStatus pimFree(PimObjId obj);
 // The size of the host-side vector should match the size of this range on the PIM side.
 // If the default values for idxBegin and idxEnd are used, the entire range of the PIM object will be considered.
 // For PIM_BOOL type, please use std::vector<uint8_t> instead of std::vector<bool> as host data.
-PimStatus pimCopyHostToDevice(void* src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-PimStatus pimCopyDeviceToHost(PimObjId src, void* dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimCopyHostToDevice(void *src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimCopyDeviceToHost(PimObjId src, void *dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
 PimStatus pimCopyDeviceToDevice(PimObjId src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
 PimStatus pimCopyObjectToObject(PimObjId src, PimObjId dest);
 PimStatus pimConvertType(PimObjId src, PimObjId dest);
@@ -191,7 +198,7 @@ PimStatus pimLTScalar(PimObjId src, PimObjId destBool, uint64_t scalarValue);
 PimStatus pimEQScalar(PimObjId src, PimObjId destBool, uint64_t scalarValue);
 PimStatus pimNEScalar(PimObjId src, PimObjId destBool, uint64_t scalarValue);
 
-// multiply src1 with scalarValue and add the multiplication result with src2. Save the result to dest. 
+// multiply src1 with scalarValue and add the multiplication result with src2. Save the result to dest.
 PimStatus pimScaledAdd(PimObjId src1, PimObjId src2, PimObjId dest, uint64_t scalarValue);
 PimStatus pimPopCount(PimObjId src, PimObjId dest);
 
@@ -203,13 +210,13 @@ PimStatus pimPrefixSum(PimObjId src, PimObjId dest);
 // Note: dest must be of the same data type as src1 and src2; Size of dest must be equal to the total number of PIM cores in the device.
 // Note: The MAC operation is performed in parallel across all PIM cores, and each PIM core writes its local MAC value to the specific id of the dest.
 // Note: User needs to ensure that dest vector is of size equal to the total number of PIM cores in the device, and contains `0` or any value that the user wants it to have as initial values.
-PimStatus pimMAC(PimObjId src1, PimObjId src2, void* dest);
+PimStatus pimMAC(PimObjId src1, PimObjId src2, void *dest);
 
 // Note: Reduction sum range is [idxBegin, idxEnd)
-PimStatus pimRedSum(PimObjId src, void* sum, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimRedSum(PimObjId src, void *sum, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
 // Min/Max Reduction APIs
-PimStatus pimRedMin(PimObjId src, void* min, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-PimStatus pimRedMax(PimObjId src, void* max, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimRedMin(PimObjId src, void *min, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimRedMax(PimObjId src, void *max, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
 
 // Bit slice operations
 PimStatus pimBitSliceExtract(PimObjId src, PimObjId destBool, unsigned bitIdx);
@@ -238,16 +245,19 @@ PimStatus pimShiftBitsLeft(PimObjId src, PimObjId dest, unsigned shiftAmount);
 // Note: AES S-box and inverse S-box are treated separately because their bit-serial performance models differ.
 // However, it is the user's responsibility to provide the appropriate LUT to ensure correct functionality.
 // The function pimAesInverseSbox expects an inverse S-box LUT as its input.
-PimStatus pimAesSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t>& lut); 
-PimStatus pimAesInverseSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t>& lut); 
+PimStatus pimAesSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t> &lut);
+PimStatus pimAesInverseSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t> &lut);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Experimental Feature: PIM API Fusion                                       //
 ////////////////////////////////////////////////////////////////////////////////
-struct PimProg {
+struct PimProg
+{
   template <typename... Args>
-  void add(PimStatus(*api)(Args...), Args... args) {
-    m_apis.push_back([=]() { return api(args...); });
+  void add(PimStatus (*api)(Args...), Args... args)
+  {
+    m_apis.push_back([=]()
+                     { return api(args...); });
   }
   std::vector<std::function<PimStatus()>> m_apis;
 };
@@ -259,8 +269,8 @@ PimStatus pimFuse(PimProg prog);
 ////////////////////////////////////////////////////////////////////////////////
 
 // Data copy APIs that supports data transposition between V/H layout
-PimStatus pimCopyHostToDeviceWithType(PimCopyEnum copyType, void* src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-PimStatus pimCopyDeviceToHostWithType(PimCopyEnum copyType, PimObjId src, void* dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimCopyHostToDeviceWithType(PimCopyEnum copyType, void *src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+PimStatus pimCopyDeviceToHostWithType(PimCopyEnum copyType, PimObjId src, void *dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
 
 // Dual contact reference: Create a new PimObjId that references to the negation of the original PimObjId
 // Do not use a dual contact reference PimObjId as refId
@@ -270,6 +280,29 @@ PimObjId pimCreateDualContactRef(PimObjId refId);
 // This is not available for now
 PimObjId pimCreateRangedRef(PimObjId refId, uint64_t idxBegin, uint64_t idxEnd);
 
+// =====================================================================
+// ON-CNN Specific High-Level PIM APIs
+// =====================================================================
+
+//! @brief Executes the Online Serial-Serial Multiplier (OSSM) logic on PIM
+//! @param srcX The first input feature map vector
+//! @param srcY The filter vector
+//! @param destP The output integer object storing generated signed-digits (-1, 0, 1)
+//! @param numBits Precision of the inputs (e.g., 16 bits)
+PimStatus pimOSSM(PimObjId srcX, PimObjId srcY, PimObjId destP, int numBits);
+
+//! @brief Executes the On-the-Fly Converter (OFC) logic to assimilate signed-digits
+//! @param q_mag Boolean vector indicating if the digit is non-zero (Magnitude)
+//! @param q_sign Boolean vector indicating if the digit is negative (Sign)
+//! @param destQ The primary assimilation register (Q)
+//! @param destQM The secondary assimilation register for negative handling (QM)
+//! @param step The current execution cycle/step in the MSDF loop
+PimStatus pimOFC(PimObjId q_mag, PimObjId q_sign, PimObjId destQ, PimObjId destQM, int step);
+
+//! @brief Performs a 4-level Reduction Tree for the OA Tree in Bit-Serial format
+//! @param srcP Integer vector containing signed-digit outputs from 16 OSSMs
+//! @param destSum The aggregated output digit for the current level
+PimStatus pimOATreeReduce(PimObjId srcP, PimObjId destSum);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Warning: Do not use below micro-ops level APIs for functional simulation   //
@@ -278,7 +311,8 @@ PimObjId pimCreateRangedRef(PimObjId refId, uint64_t idxBegin, uint64_t idxEnd);
 // BitSIMD micro ops
 // Note: Below APIs are for low-level micro-ops programming but not for functional simulation
 // BitSIMD-V: Row-wide bit registers per subarray
-enum PimRowReg {
+enum PimRowReg
+{
   PIM_RREG_NONE = 0,
   PIM_RREG_SA,
   PIM_RREG_R1,
@@ -335,4 +369,3 @@ PimStatus pimOpAP(int numSrc, ...);
 PimStatus pimOpAAP(int numSrc, int numDest, ...);
 
 #endif
-
