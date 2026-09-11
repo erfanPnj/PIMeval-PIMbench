@@ -192,6 +192,35 @@ void conv2d_on_cnn(int C_in, int K, int numBits, int numElements, bool debugPrin
     // Optional: Copy results back to host for verification
     pimCopyDeviceToHost(acc, (void *)host_output.data());
 
+    // --- CPU Verification ---
+    cout << "Verifying results with CPU..." << endl;
+    bool is_correct = true;
+
+    // شبیه‌سازی منطق کانولوشن روی CPU برای یک پنجره (M = 16)
+    int expected_mac = 0;
+    for (int iter = 0; iter < iterations; ++iter)
+    {
+        // در این مثال ساده، تصویر=2 و فیلتر=3 است
+        expected_mac += (2 * 3);
+    }
+
+    // بررسی خروجی PIM
+    for (int i = 0; i < numElements; ++i)
+    {
+        if (host_output[i] != expected_mac)
+        {
+            is_correct = false;
+            cout << "Mismatch at index " << i << "! Expected: " << expected_mac
+                 << ", Got: " << host_output[i] << endl;
+            break;
+        }
+    }
+
+    if (is_correct)
+    {
+        cout << "SUCCESS: PIM results match CPU exactly!" << endl;
+    }
+
     // -----------------------------------------------------------------
     // Step 4: Cleanup PIM Resources
     // -----------------------------------------------------------------

@@ -16,3 +16,6 @@ compile_commands.json
 .vscode/
 
 repomix-output.*
+
+PIMbench/vgg16/PIM/normal_vgg16.txt
+PIMbench/vgg16/PIM/on_cnn_vgg16.txt
