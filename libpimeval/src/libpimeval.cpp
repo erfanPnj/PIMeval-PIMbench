@@ -730,84 +730,168 @@ pimOpAAP(int numSrc, int numDest, ...)
 
 PimStatus pimOSSM(PimObjId srcX, PimObjId srcY, PimObjId destP, int numBits)
 {
-  // Step 1: Allocate Temporary Registers as memory rows in the same subarray
-  // W holds the residual value in the Carry-Save format mathematically
-  PimObjId W = pimAllocAssociated(srcX, PIM_INT32);
-  pimBroadcastUInt(W, 0); // Initialize residual to 0
-
-  // Shift registers for CA-REG logic
+  PimObjId W_sum = pimAllocAssociated(srcX, PIM_INT32);
+  pimBroadcastInt(W_sum, 0);
+  PimObjId W_carry = pimAllocAssociated(srcX, PIM_INT32);
+  pimBroadcastInt(W_carry, 0);
   PimObjId X_reg = pimAllocAssociated(srcX, PIM_INT32);
-  pimBroadcastUInt(X_reg, 0);
+  pimBroadcastInt(X_reg, 0);
   PimObjId Y_reg = pimAllocAssociated(srcY, PIM_INT32);
-  pimBroadcastUInt(Y_reg, 0);
+  pimBroadcastInt(Y_reg, 0);
 
-  // Temporary boolean and arithmetic vectors
   PimObjId x_j_bool = pimAllocAssociated(srcX, PIM_BOOL);
   PimObjId y_j_bool = pimAllocAssociated(srcY, PIM_BOOL);
   PimObjId partial_X = pimAllocAssociated(srcX, PIM_INT32);
   PimObjId partial_Y = pimAllocAssociated(srcY, PIM_INT32);
-  PimObjId v_est = pimAllocAssociated(srcX, PIM_INT32);
 
-  // Step 2: MSDF Execution Loop (Radix-2 OSSM has online delay delta_M = 3)
+  PimObjId v_est_sum = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId v_est_carry = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId S1 = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId C1 = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId C1_shifted = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId C2 = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId temp1 = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId temp2 = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId temp3 = pimAllocAssociated(srcX, PIM_INT32);
+
+  // Temps for SELM & M-Block
+  PimObjId v_S_top = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId v_C_top = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId v_top = pimAllocAssociated(srcX, PIM_INT32);
+  PimObjId v_m1 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId v_0 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId v_1 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId v_2 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId pp = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId pn = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId p_mag = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId not_vm1 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId not_v0 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId not_v1 = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId temp_or = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId v_0_star = pimAllocAssociated(srcX, PIM_BOOL);
+  PimObjId mask_29 = pimAllocAssociated(srcX, PIM_INT32);
+  pimBroadcastInt(mask_29, 0x1FFFFFFF);
+
+  // OFC Init
+  PimObjId destQM = pimAllocAssociated(srcX, PIM_INT32);
+  pimBroadcastInt(destP, 0);
+  pimBroadcastInt(destQM, 0);
+
   for (int j = -3; j < numBits; ++j)
   {
-    int k = j + 4; // Incoming bit index
-
+    int k = j + 4;
     if (k >= 1 && k <= numBits)
     {
-      // Extract the k-th bit from MSDF inputs
-      // Note: Since standard PIMeval uses LSB-first layout, extracting (numBits - k) simulates MSDF behavior
       pimBitSliceExtract(srcX, x_j_bool, numBits - k);
       pimBitSliceExtract(srcY, y_j_bool, numBits - k);
-
-      // Insert bits into the CA-REG tracking variables
-      pimBitSliceInsert(x_j_bool, X_reg, numBits - k);
-      pimBitSliceInsert(y_j_bool, Y_reg, numBits - k);
+      // ALIGNMENT FIX: Position relative to fractional point
+      pimBitSliceInsert(x_j_bool, X_reg, 30 - k);
+      pimBitSliceInsert(y_j_bool, Y_reg, 30 - k);
     }
     else
     {
-      // Out of bounds bits are 0
-      pimBroadcastUInt(x_j_bool, 0);
-      pimBroadcastUInt(y_j_bool, 0);
+      pimBroadcastInt(x_j_bool, 0);
+      pimBroadcastInt(y_j_bool, 0);
     }
 
-    // --- Calculate v[j] = 2 * w[j] + (X_reg * y_j + Y_reg * x_j) * 2^{-3} ---
-    // 1. Shift W left by 1 (Multiply by 2)
-    pimShiftBitsLeft(W, W, 1);
+    pimShiftBitsLeft(W_sum, W_sum, 1);
+    pimShiftBitsLeft(W_carry, W_carry, 1);
 
-    // 2. Conditionally select X_reg if y_j is 1 (partial_X = X_reg * y_j)
-    pimCondBroadcast(y_j_bool, 0xFFFFFFFF, partial_X); // Set mask to all 1s if y_j is true
+    pimCondBroadcast(y_j_bool, 0xFFFFFFFF, partial_X);
     pimAnd(X_reg, partial_X, partial_X);
-
-    // 3. Conditionally select Y_reg if x_j is 1 (partial_Y = Y_reg * x_j)
     pimCondBroadcast(x_j_bool, 0xFFFFFFFF, partial_Y);
     pimAnd(Y_reg, partial_Y, partial_Y);
 
-    // 4. Add partial products and shift right by 3 (Multiply by 2^-3)
-    pimAdd(partial_X, partial_Y, partial_X);
     pimShiftBitsRight(partial_X, partial_X, 3);
+    pimShiftBitsRight(partial_Y, partial_Y, 3);
 
-    // 5. Add to W to get the new estimate (v_est)
-    pimAdd(W, partial_X, v_est);
+    // --- 4:2 Compressor ---
+    pimXor(partial_X, partial_Y, temp1);
+    pimXor(temp1, W_sum, S1);
+    pimAnd(partial_X, partial_Y, temp2);
+    pimAnd(W_sum, temp1, temp3);
+    pimOr(temp2, temp3, C1);
+    pimShiftBitsLeft(C1, C1_shifted, 1);
 
-    // --- SELM (Digit Selection) & M-Block ---
-    // In actual hardware, this is a look-up table on the top 4 bits.
-    // Here, we abstract the selection logic using thresholding for PIM performance evaluation.
-    // P_out generation and W update logic goes here...
-    // W = v_est - P_out
+    pimXor(S1, C1_shifted, temp1);
+    pimXor(temp1, W_carry, v_est_sum);
+    pimAnd(S1, C1_shifted, temp2);
+    pimAnd(W_carry, temp1, temp3);
+    pimOr(temp2, temp3, C2);
+    pimShiftBitsLeft(C2, v_est_carry, 1);
 
-    // At the end of the loop, output digit is written to destP
+    // --- SELM (Digit Selection) ---
+    pimShiftBitsRight(v_est_sum, v_S_top, 28);
+    pimShiftBitsRight(v_est_carry, v_C_top, 28);
+    pimAdd(v_S_top, v_C_top, v_top); // Assimilate top 4 bits
+
+    pimBitSliceExtract(v_top, v_m1, 3);
+    pimBitSliceExtract(v_top, v_0, 2);
+    pimBitSliceExtract(v_top, v_1, 1);
+    pimBitSliceExtract(v_top, v_2, 0);
+
+    pimNot(v_m1, not_vm1);
+    pimOr(v_0, v_1, temp_or);
+    pimAnd(not_vm1, temp_or, pp); // pp = 1
+
+    pimNot(v_0, not_v0);
+    pimNot(v_1, not_v1);
+    pimOr(not_v0, not_v1, temp_or);
+    pimAnd(v_m1, temp_or, pn); // pn = -1
+
+    pimOr(pp, pn, p_mag); // p_mag = |p|
+
+    // --- M-Block ---
+    pimXor(v_0, p_mag, v_0_star);
+    pimAnd(v_est_sum, mask_29, W_sum);
+    pimAnd(v_est_carry, mask_29, W_carry);
+
+    pimBitSliceInsert(v_0_star, W_sum, 31);
+    pimBitSliceInsert(v_1, W_sum, 30);
+    pimBitSliceInsert(v_2, W_sum, 29);
+
+    // --- OFC (In-Place Generation) ---
+    if (j >= 0)
+    {
+      pimOFC(p_mag, pn, destP, destQM, numBits - 1 - j);
+    }
   }
 
-  // Step 3: Cleanup temporary associated objects to free subarray rows
-  pimFree(W);
+  pimFree(W_sum);
+  pimFree(W_carry);
   pimFree(X_reg);
   pimFree(Y_reg);
   pimFree(x_j_bool);
   pimFree(y_j_bool);
   pimFree(partial_X);
   pimFree(partial_Y);
-  pimFree(v_est);
+  pimFree(v_est_sum);
+  pimFree(v_est_carry);
+  pimFree(S1);
+  pimFree(C1);
+  pimFree(C1_shifted);
+  pimFree(C2);
+  pimFree(temp1);
+  pimFree(temp2);
+  pimFree(temp3);
+  pimFree(v_S_top);
+  pimFree(v_C_top);
+  pimFree(v_top);
+  pimFree(v_m1);
+  pimFree(v_0);
+  pimFree(v_1);
+  pimFree(v_2);
+  pimFree(pp);
+  pimFree(pn);
+  pimFree(p_mag);
+  pimFree(not_vm1);
+  pimFree(not_v0);
+  pimFree(not_v1);
+  pimFree(temp_or);
+  pimFree(v_0_star);
+  pimFree(mask_29);
+  pimFree(destQM);
 
   return PIM_OK;
 }

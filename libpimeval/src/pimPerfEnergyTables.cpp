@@ -61,7 +61,7 @@ const std::unordered_map<PimDeviceEnum, std::unordered_map<PimDataType,
                                 {PIM_INT16, {
                                                 // ON-CNN Profiling Results: { #Read, #Write, #Logic }
                                                 // OSSM: For n=16, involves reading bits, partial product ANDs, and 4:2 CSA across n+3 cycles
-                                                {PimCmdEnum::OSSM, {128, 64, 312}},
+                                                {PimCmdEnum::OSSM, {456, 228, 684}},
 
                                                 // OFC: Condition check (1 R, 1 L) + CondCopy (2 R, 2 W, 2 L) + Insert (1 W) per step
                                                 {PimCmdEnum::OFC, {48, 48, 112}},
@@ -109,7 +109,7 @@ const std::unordered_map<PimDeviceEnum, std::unordered_map<PimDataType,
                                 {PIM_INT32, {
                                                 // ON-CNN Profiling Results: { #Read, #Write, #Logic }
                                                 // OSSM: For n=16, involves reading bits, partial product ANDs, and 4:2 CSA across n+3 cycles
-                                                {PimCmdEnum::OSSM, {128, 64, 312}},
+                                                {PimCmdEnum::OSSM, {456, 228, 684}},
 
                                                 // OFC: Condition check (1 R, 1 L) + CondCopy (2 R, 2 W, 2 L) + Insert (1 W) per step
                                                 {PimCmdEnum::OFC, {48, 48, 112}},

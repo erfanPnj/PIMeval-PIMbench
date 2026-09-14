@@ -6,6 +6,9 @@
 PROJ_ROOT = ../../..
 include ${PROJ_ROOT}/Makefile.common
 
+CXXFLAGS += -O3 -march=native
+
+
 # make USE_OPENMP=1
 USE_OPENMP ?= 0
 ifeq ($(USE_OPENMP),1)
