@@ -99,7 +99,7 @@ void performConv_ON_CNN(const std::vector<std::vector<int>> &filterMatrix,
                         int inputWidth)
 {
     const int numBits = 16;
-    const int M = 16;
+    const int M = 32;
     int filterCols = filterMatrix[0].size();
     outputMatrix.assign(numRequiredPIMCol, 0);
 
@@ -135,7 +135,7 @@ void performConv_ON_CNN(const std::vector<std::vector<int>> &filterMatrix,
 
         for (int j = 0; j < shiftAmount; j++)
         {
-            pimShiftElementsRight(tempIfm);
+            pimShiftElementsLeft(tempIfm);
         }
 
         // Hardware Block 1: OSSM (contains the 4:2 CSA logic)
@@ -188,7 +188,7 @@ void conv2_ON_CNN(std::vector<std::vector<std::vector<int>>> &inputMatrix,
 
     // --- PROFILING MODE: ON-CNN Interleaved Memory Mapping ---
     // In the hardware architecture, each processing element (PE) receives exactly 16 channels for one pixel
-    int M = 16;
+    int M = 32;
     int matChunk = (inputDepth < M) ? inputDepth : M;
     int numPixels = outMatRow * outMatCol;
     int tempcol = numPixels * M; // Pad columns to M=16 boundary for OATree alignment
