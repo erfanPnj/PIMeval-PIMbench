@@ -92,12 +92,14 @@ struct Params getInputParams(int argc, char **argv)
 // Replaces performConv() in utilML.h
 // =====================================================================
 void performConv_ON_CNN(const std::vector<std::vector<int>> &filterMatrix,
-                        const std::vector<std::vector<int>> &inputMatrix,
+                        const std::vector<int> &inputMatrix,
                         std::vector<int> &outputMatrix,
                         int numRequiredPIMRows,
-                        int numRequiredPIMCol)
+                        int numRequiredPIMCol,
+                        int inputWidth)
 {
     const int numBits = 16;
+    const int M = 16;
     int filterCols = filterMatrix[0].size();
     outputMatrix.assign(numRequiredPIMCol, 0);
 
@@ -111,43 +113,40 @@ void performConv_ON_CNN(const std::vector<std::vector<int>> &filterMatrix,
     PimObjId filterObj = pimAllocAssociated(ifmObj, PIM_INT16);
     PimObjId destP = pimAllocAssociated(ifmObj, PIM_INT32);
     PimObjId destSum = pimAllocAssociated(ifmObj, PIM_INT32);
-    PimObjId destQ = pimAllocAssociated(ifmObj, PIM_INT32);
-    PimObjId destQM = pimAllocAssociated(ifmObj, PIM_INT32);
-    PimObjId q_sign = pimAllocAssociated(ifmObj, PIM_BOOL);
-    PimObjId q_mag = pimAllocAssociated(ifmObj, PIM_BOOL);
     PimObjId accObj = pimAllocAssociated(ifmObj, PIM_INT32);
 
     pimBroadcastInt(accObj, 0);
+
+    pimCopyHostToDevice((void *)inputMatrix.data(), ifmObj);
+
+    PimObjId tempIfm = pimAllocAssociated(ifmObj, PIM_INT16);
+    pimCopyObjectToObject(ifmObj, tempIfm);
 
     for (int i = 0; i < numRequiredPIMRows; i++)
     {
         int filterVal = filterMatrix[i / filterCols][i % filterCols];
 
-        pimCopyHostToDevice((void *)inputMatrix[i].data(), ifmObj);
         pimBroadcastInt(filterObj, filterVal);
 
+        pimCopyObjectToObject(ifmObj, tempIfm);
+        int kr = i / filterCols; // kernel row
+        int kc = i % filterCols; // kernel column
+        int shiftAmount = (kr * inputWidth + kc) * M;
+
+        for (int j = 0; j < shiftAmount; j++)
+        {
+            pimShiftElementsRight(tempIfm);
+        }
+
         // Hardware Block 1: OSSM (contains the 4:2 CSA logic)
-        pimOSSM(ifmObj, filterObj, destP, numBits);
+        pimOSSM(tempIfm, filterObj, destP, numBits);
 
         // Hardware Block 2: OA Tree Reduction
         // The destP output from OSSM is a vector of 16-bit partial products. We need to reduce these to a single sum using an in-memory adder tree.
         pimOATreeReduce(destP, destSum);
 
-        // Hardware Block 3: OFC
-        // The output from the adder tree (destSum) is fed into the format converter, not the direct multiplication results.
-        pimBitSliceExtract(destSum, q_sign, 31);
-        pimBitSliceExtract(destSum, q_mag, 0);
-
-        pimBroadcastInt(destQ, 0);
-        pimBroadcastInt(destQM, 0);
-
-        for (int step = 0; step < numBits + 5; ++step)
-        {
-            pimOFC(q_mag, q_sign, destQ, destQM, step);
-        }
-
-        // Hardware Block 4: Carry-Propagate Accumulation
-        pimAdd(accObj, destQ, accObj);
+        // Hardware Block 3: Carry-Propagate Accumulation
+        pimAdd(accObj, destSum, accObj);
     }
 
     outputMatrix.resize(numRequiredPIMCol);
@@ -157,11 +156,8 @@ void performConv_ON_CNN(const std::vector<std::vector<int>> &filterMatrix,
     pimFree(filterObj);
     pimFree(destP);
     pimFree(destSum);
-    pimFree(destQ);
-    pimFree(destQM);
-    pimFree(q_sign);
-    pimFree(q_mag);
     pimFree(accObj);
+    pimFree(tempIfm);
 }
 
 // =====================================================================
@@ -197,27 +193,23 @@ void conv2_ON_CNN(std::vector<std::vector<std::vector<int>>> &inputMatrix,
     int numPixels = outMatRow * outMatCol;
     int tempcol = numPixels * M; // Pad columns to M=16 boundary for OATree alignment
 
-    std::vector<std::vector<int>> mergedMat(numOfPIMRow, std::vector<int>(tempcol, 0));
+    int totalElements = inputHeight * inputWidth * M;
+    std::vector<int> baseInterleavedImage(totalElements, 0);
     std::vector<std::vector<std::vector<int>>> allDecomp(matChunk);
 
-    for (int k = 0; k < matChunk; k++)
-    {
-        decomposeMatrix(inputHeight, inputWidth, kernelHeight, kernelWidth, stride, 0, inputMatrix[k], allDecomp[k]);
-    }
-
     // INTERLEAVING: For each PIM row, we interleave the decomposed matrices of the first M channels (or fewer if inputDepth < M) to match the ON-CNN memory layout. This ensures that each PIM core receives the correct data for processing.
-    for (int r = 0; r < numOfPIMRow; r++)
+    for (int h = 0; h < inputHeight; h++)
     {
-        for (int p = 0; p < numPixels; p++)
+        for (int w = 0; w < inputWidth; w++)
         {
             for (int c = 0; c < matChunk; c++)
             {
-                mergedMat[r][p * M + c] = allDecomp[c][r][p];
+                int index = (h * inputWidth + w) * M + c;
+                baseInterleavedImage[index] = inputMatrix[c][h][w];
             }
         }
     }
-
-    performConv_ON_CNN(kernelMatrix[0], mergedMat, outVector, numOfPIMRow, tempcol);
+    performConv_ON_CNN(kernelMatrix[0], baseInterleavedImage, outVector, numOfPIMRow, tempcol, inputWidth);
 
     int totalChunks = kernelDepth * std::ceil((float)inputDepth / M);
     std::cout << " [Profiler] Hardware simulated for 1 chunk (M=16 Interleaved). Skipping remaining "
