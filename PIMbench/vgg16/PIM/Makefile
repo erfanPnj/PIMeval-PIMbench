@@ -15,8 +15,8 @@ ifeq ($(USE_OPENMP),1)
 	CXXFLAGS += -fopenmp
 endif
 
-EXEC := vgg16_on_cnn.out
-SRC := vgg16_on_cnn.cpp
+EXEC := vgg16.out
+SRC := vgg16.cpp
 
 COMPILE_WITH_JPEG ?= 0
 ifeq ($(COMPILE_WITH_JPEG), 1)
