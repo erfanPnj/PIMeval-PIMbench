@@ -290,6 +290,43 @@ void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<s
   pimFree(ofcOutputObj);
 }
 
+void performConvONCNN_Batched(std::vector<std::vector<int>> &batchedFilter, std::vector<std::vector<int>> &batchedIFM, std::vector<int> &outputMatrix, int numRequiredPIMRows, int activePEs)
+{
+  outputMatrix.assign(activePEs, 0);
+
+  PimObjId accObject = pimAlloc(PIM_ALLOC_AUTO, activePEs, PIM_INT32);
+  PimObjId ifmObject = pimAllocAssociated(accObject, PIM_INT32);
+  PimObjId filterObject = pimAllocAssociated(accObject, PIM_INT32);
+  PimObjId ossmOutputObj = pimAllocAssociated(accObject, PIM_INT32);
+  PimObjId ofcOutputObj = pimAllocAssociated(accObject, PIM_INT32);
+
+  if (accObject == -1 || ifmObject == -1 || filterObject == -1) {
+    std::cout << "Function: " << __func__ << " Abort: pimAlloc failed" << std::endl;
+    return;
+  }
+
+  pimCopyHostToDevice((void *)outputMatrix.data(), accObject);
+
+  // در اینجا تمام PEهای فعال (تا سقف 4096 عدد) به صورت موازی تغذیه می‌شوند
+  for (int i = 0; i < numRequiredPIMRows; i++)
+  {
+    pimCopyHostToDevice((void *)batchedIFM[i].data(), ifmObject);
+    pimCopyHostToDevice((void *)batchedFilter[i].data(), filterObject);
+
+    pimOSSM(ifmObject, filterObject, ossmOutputObj);
+    pimOFC(ossmOutputObj, ofcOutputObj);
+    pimAdd(accObject, ofcOutputObj, accObject);
+  }
+
+  pimCopyDeviceToHost(accObject, outputMatrix.data());
+
+  pimFree(accObject);
+  pimFree(ifmObject);
+  pimFree(filterObject);
+  pimFree(ossmOutputObj);
+  pimFree(ofcOutputObj);
+}
+
 void aggregateConv(std::vector<int> &inputVector, std::vector<int> &outputVector, unsigned hopSize)
 {
 
@@ -387,47 +424,68 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
   for (int c = 0; c < inputDepth; c++) {
       decomposeMatrix(inputHeight, inputWidth, kernelHeight, kernelWidth, stride, 0, inputMatrix[c], allDecompMats[c]);
   }
-  // -------------------------------------------------------------------------
 
   // Algorithm 3 mapping:
+  // Windows (C)
   for (int w = 0; w < totalWindows; w += C) {
     int currentC = std::min(C, totalWindows - w);
 
+    // filters (T * R)
     for (int f = 0; f < kernelDepth; f += (R * T)) {
       int currentFilters = std::min(R * T, kernelDepth - f);
 
+      // total active PEs in this iteration
+      int activePEs = currentFilters * currentC;
+
+      // channels (M)
       for (int c = 0; c < inputDepth; c += M) {
         int currentM = std::min(M, inputDepth - c);
-        
-        std::vector<std::vector<int>> mergedIFMMat(numOfPIMRow * currentM);
+        int numRequiredRows = numOfPIMRow * currentM;
+
+        // send matrices in batches for better software performance 
+        std::vector<std::vector<int>> batchedIFM(numRequiredRows, std::vector<int>(activePEs, 0));
+        std::vector<std::vector<int>> batchedFilter(numRequiredRows, std::vector<int>(activePEs, 0));
+
+        // on-cnn data path
         for (int m_idx = 0; m_idx < currentM; m_idx++) {
-            for (uint64_t idx = 0; idx < numOfPIMRow; idx++) {
-                mergedIFMMat[m_idx * numOfPIMRow + idx].insert(
-                    mergedIFMMat[m_idx * numOfPIMRow + idx].end(),
-                    allDecompMats[c + m_idx][idx].begin() + w,
-                    allDecompMats[c + m_idx][idx].begin() + w + currentC
-                );
+            for (int idx = 0; idx < numOfPIMRow; idx++) {
+                int row_idx = m_idx * numOfPIMRow + idx;
+                int k_r = idx / kernelWidth;
+                int k_c = idx % kernelWidth;
+
+                for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++) {
+                    int actualF = f + filt_idx;
+                    for (int win_idx = 0; win_idx < currentC; win_idx++) {
+                        int pe_idx = filt_idx * currentC + win_idx;
+
+                        batchedIFM[row_idx][pe_idx] = allDecompMats[c + m_idx][idx][w + win_idx];
+                        batchedFilter[row_idx][pe_idx] = kernelMatrix[actualF][k_r][k_c];
+                    }
+                }
             }
         }
 
+        std::vector<int> outVector;
+
+        // simulator uses all 4096 pim cores 
+        performConvONCNN_Batched(batchedFilter, batchedIFM, outVector, numRequiredRows, activePEs);
+
+        // create result matrix
         for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++) {
-            int actualFilterIndex = f + filt_idx;
-            std::vector<int> outVector;
-            
-            performConvONCNN(kernelMatrix[actualFilterIndex], mergedIFMMat, outVector, numOfPIMRow * currentM, currentC);
-            
-            for(int win_idx = 0; win_idx < currentC; win_idx++) {
+            int actualF = f + filt_idx;
+            for (int win_idx = 0; win_idx < currentC; win_idx++) {
+                int pe_idx = filt_idx * currentC + win_idx;
                 int global_win_idx = w + win_idx;
                 int r_idx = global_win_idx / outMatCol;
                 int c_idx = global_win_idx % outMatCol;
-                resultMatrix[actualFilterIndex][r_idx][c_idx] += outVector[win_idx];
+
+                resultMatrix[actualF][r_idx][c_idx] += outVector[pe_idx];
             }
         }
-      }
-    }
-  }
+      } // End of M
+    } // End of R*T
+  } // End of C
 }
-
 // void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<int>>> &kernelMatrix, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
 // {
 //   PimDeviceProperties deviceProp;
