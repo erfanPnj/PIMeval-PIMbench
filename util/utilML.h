@@ -241,6 +241,55 @@ void performConv(std::vector<std::vector<int>> &filterMatrix, std::vector<std::v
   pimFree(matrixObject);
 }
 
+// ON-CNN Data Path Implementation
+// Simulates the specific data path: PISO -> OSSM -> OA Tree -> OFC -> Accumulator
+void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<std::vector<int>> &inputMatrix, std::vector<int> &outputMatrix, int numRequiredPIMRows, int numRequiredPIMCol)
+{
+  //safe initialization of outputMatrix to avoid undefined behavior in case of early return
+  outputMatrix.assign(numRequiredPIMCol, 0);
+
+  PimObjId accObject = pimAlloc(PIM_ALLOC_AUTO, numRequiredPIMCol, PIM_INT32);
+  PimObjId ifmObject = pimAllocAssociated(accObject, PIM_INT32);
+  PimObjId filterObject = pimAllocAssociated(accObject, PIM_INT32);
+  PimObjId ossmOutputObj = pimAllocAssociated(accObject, PIM_INT32);
+  PimObjId ofcOutputObj = pimAllocAssociated(accObject, PIM_INT32);
+
+  if (accObject == -1 || ifmObject == -1 || filterObject == -1) {
+    std::cout << "Function: " << __func__ << " Abort: pimAlloc failed" << std::endl;
+    return;
+  }
+
+  pimCopyHostToDevice((void *)outputMatrix.data(), accObject);
+
+  int row = filterMatrix.size();
+  int col = filterMatrix[0].size();
+  int filterSize = row * col; // number of elements in the filter matrix
+
+  for (uint64_t j = 0; j < inputMatrix.size(); j += numRequiredPIMRows)
+  {
+    for (int i = 0; i < numRequiredPIMRows; i++)
+    {
+      pimCopyHostToDevice((void *)inputMatrix[i + j].data(), ifmObject);
+      
+      int f_idx = i % filterSize; 
+      std::vector<int> currentFilter(numRequiredPIMCol, filterMatrix[f_idx / col][f_idx % col]);
+      pimCopyHostToDevice((void *)currentFilter.data(), filterObject);
+
+      pimOSSM(ifmObject, filterObject, ossmOutputObj);
+      pimOFC(ossmOutputObj, ofcOutputObj);
+      pimAdd(accObject, ofcOutputObj, accObject);
+    }
+  }
+
+  pimCopyDeviceToHost(accObject, outputMatrix.data());
+
+  pimFree(accObject);
+  pimFree(ifmObject);
+  pimFree(filterObject);
+  pimFree(ossmOutputObj);
+  pimFree(ofcOutputObj);
+}
+
 void aggregateConv(std::vector<int> &inputVector, std::vector<int> &outputVector, unsigned hopSize)
 {
 
@@ -312,10 +361,6 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
     exit(1);
   }
-  // Get the device parameters
-  uint64_t numCols = deviceProp.numColPerSubarray;
-  uint64_t numRows = deviceProp.numRowPerSubarray;
-  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;  
 
   int inputDepth = inputMatrix.size();
   int inputHeight = inputMatrix[0].size();
@@ -324,50 +369,132 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
   int kernelHeight = kernelMatrix[0].size();
   int kernelWidth = kernelMatrix[0][0].size();
 
+  // ON-CNN Specific Architecture Parameters
+  int T = 16; // Number of Tiles
+  int R = 16; // Number of PE Rows per Tile
+  int C = 16; // Number of PE Columns per Tile
+  int M = 16; // Number of Multipliers per PE (Channels processed in parallel)
+
   int outMatRow = std::floor((inputHeight - kernelHeight) / stride) + 1;
   int outMatCol = std::floor((inputWidth - kernelWidth) / stride) + 1;   
-  int numOfMatPerRow = floor((1.0 * numOfBits) / (outMatRow * outMatCol)) <  inputDepth ? floor((1.0 * numOfBits) / (outMatRow * outMatCol)) : inputDepth;
-  int numOfPIMRow = kernelHeight * kernelWidth;
+  int totalWindows = outMatRow * outMatCol; // H_out * W_out
+  int numOfPIMRow = kernelHeight * kernelWidth; // H_f * W_f
 
-  resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol)));
+  resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
 
-  for (int i = 0; i < kernelDepth; i++)
-  {
-    int tempcol = 0;
-    std::vector<int> dstVec(outMatRow * outMatCol);
-    std::vector<int> outVector(outMatRow * outMatCol * inputDepth, 0);
-    for (int j = 0; j < inputDepth; j += numOfMatPerRow)
-    {
-      int matChunk = (numOfMatPerRow + j) <= inputDepth ? (numOfMatPerRow + j) : inputDepth;
+  // decompose matrix only once
+  std::vector<std::vector<std::vector<int>>> allDecompMats(inputDepth);
+  for (int c = 0; c < inputDepth; c++) {
+      decomposeMatrix(inputHeight, inputWidth, kernelHeight, kernelWidth, stride, 0, inputMatrix[c], allDecompMats[c]);
+  }
+  // -------------------------------------------------------------------------
 
-      std::vector<std::vector<int>> mergedMat(numOfPIMRow);
-      for (int k = j; k < matChunk; k++)
-      {
-        std::vector<std::vector<int>> decompMat;
-	      decomposeMatrix(inputHeight, inputWidth, kernelMatrix[i].size(), kernelMatrix[i][0].size(), stride, 0, inputMatrix[k], decompMat);
-        // Merge the matrices
-        for (uint64_t idx = 0; idx < mergedMat.size(); idx++) {
-          mergedMat[idx].insert(mergedMat[idx].end(),
-                                std::make_move_iterator(decompMat[idx].begin()),
-                                std::make_move_iterator(decompMat[idx].end()));
+  // Algorithm 3 mapping:
+  for (int w = 0; w < totalWindows; w += C) {
+    int currentC = std::min(C, totalWindows - w);
+
+    for (int f = 0; f < kernelDepth; f += (R * T)) {
+      int currentFilters = std::min(R * T, kernelDepth - f);
+
+      for (int c = 0; c < inputDepth; c += M) {
+        int currentM = std::min(M, inputDepth - c);
+        
+        std::vector<std::vector<int>> mergedIFMMat(numOfPIMRow * currentM);
+        for (int m_idx = 0; m_idx < currentM; m_idx++) {
+            for (uint64_t idx = 0; idx < numOfPIMRow; idx++) {
+                mergedIFMMat[m_idx * numOfPIMRow + idx].insert(
+                    mergedIFMMat[m_idx * numOfPIMRow + idx].end(),
+                    allDecompMats[c + m_idx][idx].begin() + w,
+                    allDecompMats[c + m_idx][idx].begin() + w + currentC
+                );
+            }
         }
-        tempcol = mergedMat[0].size();     
-      }
-      performConv(kernelMatrix[i], mergedMat, outVector, numOfPIMRow, tempcol);
-    }
-    int hopSize = outMatCol * outMatRow;
-    aggregateConv(outVector, dstVec, hopSize);
 
-    int ddx = 0;
-    for (int rdx = 0; rdx < outMatRow; ++rdx)
-    {
-      for (int cdx = 0; cdx < outMatCol; ++cdx)
-      {
-        resultMatrix[i][rdx][cdx] = dstVec[ddx++];
+        for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++) {
+            int actualFilterIndex = f + filt_idx;
+            std::vector<int> outVector;
+            
+            performConvONCNN(kernelMatrix[actualFilterIndex], mergedIFMMat, outVector, numOfPIMRow * currentM, currentC);
+            
+            for(int win_idx = 0; win_idx < currentC; win_idx++) {
+                int global_win_idx = w + win_idx;
+                int r_idx = global_win_idx / outMatCol;
+                int c_idx = global_win_idx % outMatCol;
+                resultMatrix[actualFilterIndex][r_idx][c_idx] += outVector[win_idx];
+            }
+        }
       }
     }
-  }  
+  }
 }
+
+// void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<int>>> &kernelMatrix, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
+// {
+//   PimDeviceProperties deviceProp;
+//   PimStatus status = pimGetDeviceProperties(&deviceProp);
+//   if (status != PIM_OK) {
+//     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
+//     exit(1);
+//   }
+//   // Get the device parameters
+//   uint64_t numCols = deviceProp.numColPerSubarray;
+//   uint64_t numRows = deviceProp.numRowPerSubarray;
+//   uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;  
+
+//   int inputDepth = inputMatrix.size();
+//   int inputHeight = inputMatrix[0].size();
+//   int inputWidth = inputMatrix[0][0].size();
+//   int kernelDepth = kernelMatrix.size();
+//   int kernelHeight = kernelMatrix[0].size();
+//   int kernelWidth = kernelMatrix[0][0].size();
+
+//   int outMatRow = std::floor((inputHeight - kernelHeight) / stride) + 1;
+//   int outMatCol = std::floor((inputWidth - kernelWidth) / stride) + 1;   
+//   int numOfMatPerRow = floor((1.0 * numOfBits) / (outMatRow * outMatCol)) <  inputDepth ? floor((1.0 * numOfBits) / (outMatRow * outMatCol)) : inputDepth;
+//   int numOfPIMRow = kernelHeight * kernelWidth;
+
+//   resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol)));
+
+//   for (int i = 0; i < kernelDepth; i++)
+//   {
+//     int tempcol = 0;
+//     std::vector<int> dstVec(outMatRow * outMatCol);
+//     std::vector<int> outVector(outMatRow * outMatCol * inputDepth, 0);
+//     for (int j = 0; j < inputDepth; j += numOfMatPerRow)
+//     {
+//       int matChunk = (numOfMatPerRow + j) <= inputDepth ? (numOfMatPerRow + j) : inputDepth;
+
+//       std::vector<std::vector<int>> mergedMat(numOfPIMRow);
+//       for (int k = j; k < matChunk; k++)
+//       {
+//         std::vector<std::vector<int>> decompMat;
+//         decomposeMatrix(inputHeight, inputWidth, kernelMatrix[i].size(), kernelMatrix[i][0].size(), stride, 0, inputMatrix[k], decompMat);
+//         // Merge the matrices
+//         for (uint64_t idx = 0; idx < mergedMat.size(); idx++) {
+//           mergedMat[idx].insert(mergedMat[idx].end(),
+//                                 std::make_move_iterator(decompMat[idx].begin()),
+//                                 std::make_move_iterator(decompMat[idx].end()));
+//         }
+//         tempcol = mergedMat[0].size();     
+//       }
+      
+//       // [تغییر اصلی: فراخوانی پایپ‌لاین ON-CNN به جای کانوولوشن عادی]
+//       // در اینجا کل ۵۰,۱۷۶ پنجره را یکجا به شبیه‌ساز می‌دهیم تا خودش روی ۴۰۹۶ هسته پخشش کند!
+//       performConvONCNN(kernelMatrix[i], mergedMat, outVector, numOfPIMRow, tempcol);
+//     }
+//     int hopSize = outMatCol * outMatRow;
+//     aggregateConv(outVector, dstVec, hopSize);
+
+//     int ddx = 0;
+//     for (int rdx = 0; rdx < outMatRow; ++rdx)
+//     {
+//       for (int cdx = 0; cdx < outMatCol; ++cdx)
+//       {
+//         resultMatrix[i][rdx][cdx] = dstVec[ddx++];
+//       }
+//     }
+//   }  
+// }
 
 // This should work for bitSIMD or any PIM that requires vertical data layout.
 // Perform the Max Pool operation in PIM for the given input matrix.

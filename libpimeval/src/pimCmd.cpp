@@ -101,6 +101,9 @@ pimCmd::getName(PimCmdEnum cmdType, const std::string& suffix)
     { PimCmdEnum::RREG_ROTATE_L, "rreg.rotate_l" },
     { PimCmdEnum::ROW_AP, "row_ap" },
     { PimCmdEnum::ROW_AAP, "row_aap" },
+    { PimCmdEnum::OSSM, "ossm" },
+    { PimCmdEnum::OFC, "ofc" },
+    { PimCmdEnum::OA_REDUCE, "oa_reduce" },
   };
   auto it = cmdNames.find(cmdType);
   return it != cmdNames.end() ? it->second + suffix : "unknown";

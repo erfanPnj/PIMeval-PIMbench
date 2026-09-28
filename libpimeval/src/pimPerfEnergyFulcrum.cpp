@@ -100,6 +100,7 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc1(PimCmdEnum cmdType, const pimObjInfo
       break;
     }
     case PimCmdEnum::ABS:
+    case PimCmdEnum::OFC:
     case PimCmdEnum::CONVERT_TYPE:
     case PimCmdEnum::ADD_SCALAR:
     case PimCmdEnum::SUB_SCALAR:
@@ -159,6 +160,7 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
   switch (cmdType)
   {
     case PimCmdEnum::MUL:
+    case PimCmdEnum::OSSM:
     case PimCmdEnum::DIV:
     {
       msRead = 2 * m_tR * numPass;
@@ -248,6 +250,7 @@ pimPerfEnergyFulcrum::getPerfEnergyForReduction(PimCmdEnum cmdType, const pimObj
   switch (cmdType)
   {
   case PimCmdEnum::REDSUM:
+  case PimCmdEnum::OA_REDUCE:
   case PimCmdEnum::REDSUM_RANGE:
   case PimCmdEnum::REDMIN:
   case PimCmdEnum::REDMIN_RANGE:

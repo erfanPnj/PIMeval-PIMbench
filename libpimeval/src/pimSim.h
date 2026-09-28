@@ -130,6 +130,11 @@ public:
   bool pimPrefixSum(PimObjId src, PimObjId dest);
   bool pimMAC(PimObjId src1, PimObjId src2, void* dest);
 
+  // on-cnn function signitures
+  bool pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest);
+  bool pimOFC(PimObjId src, PimObjId dest);
+  bool pimOAReduce(PimObjId src, void* result);
+
   // PIM API Fusion
   bool pimFuse(PimProg prog);
 

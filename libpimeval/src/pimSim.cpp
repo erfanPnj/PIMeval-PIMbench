@@ -1151,6 +1151,25 @@ pimSim::pimOpAAP(int numSrc, int numDest, va_list args)
   return m_device->executeCmd(std::move(cmd));
 }
 
+// ON-CNN Specific Implementations in pimSim
+bool pimSim::pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest) {
+  if (!isValidDevice()) return false;
+  std::unique_ptr<pimCmd> cmd = std::make_unique<pimCmdFunc2>(PimCmdEnum::OSSM, src1, src2, dest);
+  return m_device->executeCmd(std::move(cmd));
+}
+
+bool pimSim::pimOFC(PimObjId src, PimObjId dest) {
+  if (!isValidDevice()) return false;
+  std::unique_ptr<pimCmd> cmd = std::make_unique<pimCmdFunc1>(PimCmdEnum::OFC, src, dest);
+  return m_device->executeCmd(std::move(cmd));
+}
+
+bool pimSim::pimOAReduce(PimObjId src, void* result) {
+  if (!isValidDevice()) return false;
+  std::unique_ptr<pimCmd> cmd = std::make_unique<pimCmdReduction<int>>(PimCmdEnum::OA_REDUCE, src, result);
+  return m_device->executeCmd(std::move(cmd));
+}
+
 // Explicit template instantiations
 template bool pimSim::pimBroadcast<uint64_t>(PimObjId dest, uint64_t value);
 template bool pimSim::pimBroadcast<int64_t>(PimObjId dest, int64_t value);

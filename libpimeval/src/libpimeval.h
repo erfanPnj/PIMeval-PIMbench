@@ -284,25 +284,31 @@ PimObjId pimCreateRangedRef(PimObjId refId, uint64_t idxBegin, uint64_t idxEnd);
 // ON-CNN Specific High-Level PIM APIs
 // =====================================================================
 
-//! @brief Executes the Online Serial-Serial Multiplier (OSSM) logic on PIM
-//! @param srcX The first input feature map vector
-//! @param srcY The filter vector
-//! @param destP The output integer object storing generated signed-digits (-1, 0, 1)
-//! @param numBits Precision of the inputs (e.g., 16 bits)
-PimStatus pimOSSM(PimObjId srcX, PimObjId srcY, PimObjId destP, int numBits);
+// //! @brief Executes the Online Serial-Serial Multiplier (OSSM) logic on PIM
+// //! @param srcX The first input feature map vector
+// //! @param srcY The filter vector
+// //! @param destP The output integer object storing generated signed-digits (-1, 0, 1)
+// //! @param numBits Precision of the inputs (e.g., 16 bits)
+// PimStatus pimOSSM(PimObjId srcX, PimObjId srcY, PimObjId destP, int numBits);
 
-//! @brief Executes the On-the-Fly Converter (OFC) logic to assimilate signed-digits
-//! @param q_mag Boolean vector indicating if the digit is non-zero (Magnitude)
-//! @param q_sign Boolean vector indicating if the digit is negative (Sign)
-//! @param destQ The primary assimilation register (Q)
-//! @param destQM The secondary assimilation register for negative handling (QM)
-//! @param step The current execution cycle/step in the MSDF loop
-PimStatus pimOFC(PimObjId q_mag, PimObjId q_sign, PimObjId destQ, PimObjId destQM, int step);
+// //! @brief Executes the On-the-Fly Converter (OFC) logic to assimilate signed-digits
+// //! @param q_mag Boolean vector indicating if the digit is non-zero (Magnitude)
+// //! @param q_sign Boolean vector indicating if the digit is negative (Sign)
+// //! @param destQ The primary assimilation register (Q)
+// //! @param destQM The secondary assimilation register for negative handling (QM)
+// //! @param step The current execution cycle/step in the MSDF loop
+// PimStatus pimOFC(PimObjId q_mag, PimObjId q_sign, PimObjId destQ, PimObjId destQM, int step);
 
-//! @brief Performs a 4-level Reduction Tree for the OA Tree in Bit-Serial format
-//! @param srcP Integer vector containing signed-digit outputs from 16 OSSMs
-//! @param destSum The aggregated output digit for the current level
-PimStatus pimOATreeReduce(PimObjId srcP, PimObjId destSum);
+// //! @brief Performs a 4-level Reduction Tree for the OA Tree in Bit-Serial format
+// //! @param srcP Integer vector containing signed-digit outputs from 16 OSSMs
+// //! @param destSum The aggregated output digit for the current level
+// PimStatus pimOATreeReduce(PimObjId srcP, PimObjId destSum);
+
+// these are functional apis. they don't use micro ops to keep performance model simple. They are not accurate for timing simulation.
+// ON-CNN Specific APIs
+PimStatus pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest);
+PimStatus pimOFC(PimObjId src, PimObjId dest);
+PimStatus pimOAReduce(PimObjId src, void* result);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Warning: Do not use below micro-ops level APIs for functional simulation   //

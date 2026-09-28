@@ -339,6 +339,13 @@ private:
       }
       break;
     }
+    // [ADD THIS BLOCK] - Handle On-the-Fly Converter functionally
+    case PimCmdEnum::OFC:
+      // Functionally, OFC converts from signed-digit to binary, 
+      // so the integer value remains the same in our high-level simulation.
+      result = operand; 
+      break;
+    // [/ADD THIS BLOCK]
     case PimCmdEnum::AES_SBOX:
     case PimCmdEnum::AES_INVERSE_SBOX:
       result = m_lut[operand];
@@ -463,6 +470,12 @@ private:
     case PimCmdEnum::MUL:
       result = operand1 * operand2;
       break;
+      // [ADD THIS BLOCK] - Handle Online Serial-Serial Multiplier functionally
+    case PimCmdEnum::OSSM:
+      // Functionally equivalent to multiplication, but hardware timing will differ
+      result = operand1 * operand2;
+      break;
+    // [/ADD THIS BLOCK]
     case PimCmdEnum::DIV:
       if (operand2 == 0)
       {
@@ -620,12 +633,12 @@ public:
   pimCmdReduction(PimCmdEnum cmdType, PimObjId src, void *result)
       : pimCmd(cmdType), m_src(src), m_result(result)
   {
-    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX);
+    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::OA_REDUCE);
   }
   pimCmdReduction(PimCmdEnum cmdType, PimObjId src, void *result, uint64_t idxBegin, uint64_t idxEnd)
       : pimCmd(cmdType), m_src(src), m_result(result), m_idxBegin(idxBegin)
   {
-    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::REDSUM_RANGE || cmdType == PimCmdEnum::REDMIN_RANGE || cmdType == PimCmdEnum::REDMAX_RANGE);
+    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::REDSUM_RANGE || cmdType == PimCmdEnum::REDMIN_RANGE || cmdType == PimCmdEnum::REDMAX_RANGE|| cmdType == PimCmdEnum::OA_REDUCE);
     if (idxEnd)
       m_idxEnd = idxEnd;
   }
