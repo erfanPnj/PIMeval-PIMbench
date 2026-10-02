@@ -727,7 +727,7 @@ pimOpAAP(int numSrc, int numDest, ...)
 // =====================================================================
 // ON-CNN Specific High-Level PIM Implementations
 // =====================================================================
-// below functions are micro level implementation --> takes a lot of time to run 
+// below functions are micro level implementation --> takes a lot of time to run
 
 // PimStatus pimOSSM(PimObjId srcX, PimObjId srcY, PimObjId destP, int numBits)
 // {
@@ -974,19 +974,27 @@ pimOpAAP(int numSrc, int numDest, ...)
 //   return PIM_OK;
 // }
 
-
 // Implementation of ON-CNN APIs
-PimStatus pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest) {
-    bool ok = pimSim::get()->pimOSSM(src1, src2, dest);
-    return ok ? PIM_OK : PIM_ERROR;
+PimStatus pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest)
+{
+  bool ok = pimSim::get()->pimOSSM(src1, src2, dest);
+  return ok ? PIM_OK : PIM_ERROR;
 }
 
-PimStatus pimOFC(PimObjId src, PimObjId dest) {
-    bool ok = pimSim::get()->pimOFC(src, dest);
-    return ok ? PIM_OK : PIM_ERROR;
+PimStatus pimOFC(PimObjId src, PimObjId dest)
+{
+  bool ok = pimSim::get()->pimOFC(src, dest);
+  return ok ? PIM_OK : PIM_ERROR;
 }
 
-PimStatus pimOAReduce(PimObjId src, void* result) {
-    bool ok = pimSim::get()->pimOAReduce(src, result);
-    return ok ? PIM_OK : PIM_ERROR;
+PimStatus pimOAReduce(PimObjId src, void *result)
+{
+  bool ok = pimSim::get()->pimOAReduce(src, result);
+  return ok ? PIM_OK : PIM_ERROR;
+}
+
+PimStatus pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest)
+{
+  bool ok = pimSim::get()->pimONCNNMac(src1, src2, dest);
+  return ok ? PIM_OK : PIM_ERROR;
 }

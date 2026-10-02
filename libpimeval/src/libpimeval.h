@@ -308,7 +308,10 @@ PimObjId pimCreateRangedRef(PimObjId refId, uint64_t idxBegin, uint64_t idxEnd);
 // ON-CNN Specific APIs
 PimStatus pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest);
 PimStatus pimOFC(PimObjId src, PimObjId dest);
-PimStatus pimOAReduce(PimObjId src, void* result);
+PimStatus pimOAReduce(PimObjId src, void *result);
+
+// fused mac implementation
+PimStatus pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Warning: Do not use below micro-ops level APIs for functional simulation   //

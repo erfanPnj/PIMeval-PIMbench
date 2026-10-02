@@ -95,6 +95,9 @@ enum class PimCmdEnum
   OFC,       // On-the-Fly Converter operation
   OA_REDUCE, // Online Adder Tree Reduction
 
+  // fused implementation instead of separated ossm, oa tree and ofc units
+  ONCNN_MAC,
+
   // BitSIMD v-layout commands
   ROW_R,
   ROW_W,
@@ -341,9 +344,9 @@ private:
     }
     // [ADD THIS BLOCK] - Handle On-the-Fly Converter functionally
     case PimCmdEnum::OFC:
-      // Functionally, OFC converts from signed-digit to binary, 
+      // Functionally, OFC converts from signed-digit to binary,
       // so the integer value remains the same in our high-level simulation.
-      result = operand; 
+      result = operand;
       break;
     // [/ADD THIS BLOCK]
     case PimCmdEnum::AES_SBOX:
@@ -476,6 +479,9 @@ private:
       result = operand1 * operand2;
       break;
     // [/ADD THIS BLOCK]
+    case PimCmdEnum::ONCNN_MAC:
+      result = result + operand1 * operand2;
+      break;
     case PimCmdEnum::DIV:
       if (operand2 == 0)
       {
@@ -537,6 +543,9 @@ private:
       break;
     case PimCmdEnum::MUL:
       result = operand1 * operand2;
+      break;
+    case PimCmdEnum::ONCNN_MAC:
+      result = result + operand1 * operand2;
       break;
     case PimCmdEnum::DIV:
       if (operand2 == 0)
@@ -638,7 +647,7 @@ public:
   pimCmdReduction(PimCmdEnum cmdType, PimObjId src, void *result, uint64_t idxBegin, uint64_t idxEnd)
       : pimCmd(cmdType), m_src(src), m_result(result), m_idxBegin(idxBegin)
   {
-    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::REDSUM_RANGE || cmdType == PimCmdEnum::REDMIN_RANGE || cmdType == PimCmdEnum::REDMAX_RANGE|| cmdType == PimCmdEnum::OA_REDUCE);
+    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::REDSUM_RANGE || cmdType == PimCmdEnum::REDMIN_RANGE || cmdType == PimCmdEnum::REDMAX_RANGE || cmdType == PimCmdEnum::OA_REDUCE);
     if (idxEnd)
       m_idxEnd = idxEnd;
   }

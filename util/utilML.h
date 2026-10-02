@@ -290,15 +290,14 @@ void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<s
   pimFree(ofcOutputObj);
 }
 
-void performConvONCNN_Batched(std::vector<std::vector<int>> &batchedFilter, std::vector<std::vector<int>> &batchedIFM, std::vector<int> &outputMatrix, int numRequiredPIMRows, int activePEs)
+void performConvONCNN_Batched(std::vector<std::vector<int>> &batchedFilter, std::vector<std::vector<int>> &batchedIFM, std::vector<int> &outputMatrix, int numRequiredPIMRows, int activePEs, int currentM)
 {
+  int vectorLength = activePEs * currentM;
   outputMatrix.assign(activePEs, 0);
 
   PimObjId accObject = pimAlloc(PIM_ALLOC_AUTO, activePEs, PIM_INT32);
   PimObjId ifmObject = pimAllocAssociated(accObject, PIM_INT32);
   PimObjId filterObject = pimAllocAssociated(accObject, PIM_INT32);
-  PimObjId ossmOutputObj = pimAllocAssociated(accObject, PIM_INT32);
-  PimObjId ofcOutputObj = pimAllocAssociated(accObject, PIM_INT32);
 
   if (accObject == -1 || ifmObject == -1 || filterObject == -1)
   {
@@ -306,26 +305,34 @@ void performConvONCNN_Batched(std::vector<std::vector<int>> &batchedFilter, std:
     return;
   }
 
-  pimCopyHostToDevice((void *)outputMatrix.data(), accObject);
+  std::vector<int> zeroInit(vectorLength, 0);
+  pimCopyHostToDevice((void *)zeroInit.data(), accObject);
 
-  // در اینجا تمام PEهای فعال (تا سقف 4096 عدد) به صورت موازی تغذیه می‌شوند
+  // loop H_f * W_f times (e.g. 9 for a 3x3 filter)
   for (int i = 0; i < numRequiredPIMRows; i++)
   {
     pimCopyHostToDevice((void *)batchedIFM[i].data(), ifmObject);
     pimCopyHostToDevice((void *)batchedFilter[i].data(), filterObject);
-
-    pimOSSM(ifmObject, filterObject, ossmOutputObj);
-    pimOFC(ossmOutputObj, ofcOutputObj);
-    pimAdd(accObject, ofcOutputObj, accObject);
+    pimONCNNMac(ifmObject, filterObject, accObject);
   }
 
-  pimCopyDeviceToHost(accObject, outputMatrix.data());
+  std::vector<int> rawOutput(vectorLength, 0);
+  pimCopyDeviceToHost(accObject, rawOutput.data());
+
+  // software simulation oa tree
+  for (int pe = 0; pe < activePEs; pe++)
+  {
+    int sum = 0;
+    for (int m = 0; m < currentM; m++)
+    {
+      sum += rawOutput[pe * currentM + m];
+    }
+    outputMatrix[pe] = sum;
+  }
 
   pimFree(accObject);
   pimFree(ifmObject);
   pimFree(filterObject);
-  pimFree(ossmOutputObj);
-  pimFree(ofcOutputObj);
 }
 
 void aggregateConv(std::vector<int> &inputVector, std::vector<int> &outputVector, unsigned hopSize)
@@ -463,39 +470,41 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
       for (int c = 0; c < inputDepth; c += M)
       {
         int currentM = std::min(M, inputDepth - c);
-        int numRequiredRows = numOfPIMRow * currentM;
 
-        std::vector<std::vector<int>> batchedIFM(numRequiredRows, std::vector<int>(activePEs, 0));
-        std::vector<std::vector<int>> batchedFilter(numRequiredRows, std::vector<int>(activePEs, 0));
+        // we need Hf * Wf rows
+        int numRequiredRows = numOfPIMRow;
+        int vectorLength = activePEs * currentM;
 
-        for (int m_idx = 0; m_idx < currentM; m_idx++)
+        std::vector<std::vector<int>> batchedIFM(numRequiredRows, std::vector<int>(vectorLength, 0));
+        std::vector<std::vector<int>> batchedFilter(numRequiredRows, std::vector<int>(vectorLength, 0));
+
+        // loop on filter's pixels
+        for (int idx = 0; idx < numOfPIMRow; idx++)
         {
-          for (int idx = 0; idx < numOfPIMRow; idx++)
+          int k_r = idx / kernelWidth;
+          int k_c = idx % kernelWidth;
+
+          for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++)
           {
-            int row_idx = m_idx * numOfPIMRow + idx;
-            int k_r = idx / kernelWidth;
-            int k_c = idx % kernelWidth;
-
-            for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++)
+            int actualF = f + filt_idx;
+            for (int win_idx = 0; win_idx < currentW; win_idx++)
             {
-              int actualF = f + filt_idx;
-              for (int win_idx = 0; win_idx < currentW; win_idx++)
+              int pe_idx = filt_idx * currentW + win_idx;
+
+              for (int m_idx = 0; m_idx < currentM; m_idx++)
               {
+                // put M channels of a pixel next to each other so they go to correct PE together
+                int vector_idx = pe_idx * currentM + m_idx;
 
-                // Construct the linear PE index in the new grid
-                int pe_idx = filt_idx * currentW + win_idx;
-
-                batchedIFM[row_idx][pe_idx] = allDecompMats[c + m_idx][idx][w + win_idx];
-                batchedFilter[row_idx][pe_idx] = kernelMatrix[actualF][k_r][k_c];
+                batchedIFM[idx][vector_idx] = allDecompMats[c + m_idx][idx][w + win_idx];
+                batchedFilter[idx][vector_idx] = kernelMatrix[actualF][k_r][k_c];
               }
             }
           }
         }
 
         std::vector<int> outVector;
-
-        // Call the simulator with the new scalable grid
-        performConvONCNN_Batched(batchedFilter, batchedIFM, outVector, numRequiredRows, activePEs);
+        performConvONCNN_Batched(batchedFilter, batchedIFM, outVector, numRequiredRows, activePEs, currentM);
 
         // Reconstruct the output in the image matrix
         for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++)

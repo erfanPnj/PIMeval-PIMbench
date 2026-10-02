@@ -7,27 +7,26 @@
 #ifndef LAVA_PIM_PERF_ENERGY_FULCRUM_H
 #define LAVA_PIM_PERF_ENERGY_FULCRUM_H
 
-#include "libpimeval.h"                // for PimDeviceEnum, PimDataType
-#include "pimParamsDram.h"             // for pimParamsDram
-#include "pimCmd.h"                    // for PimCmdEnum
-#include "pimResMgr.h"                 // for pimObjInfo
-#include "pimPerfEnergyBase.h"         // for pimPerfEnergyBase
-
+#include "libpimeval.h"        // for PimDeviceEnum, PimDataType
+#include "pimParamsDram.h"     // for pimParamsDram
+#include "pimCmd.h"            // for PimCmdEnum
+#include "pimResMgr.h"         // for pimObjInfo
+#include "pimPerfEnergyBase.h" // for pimPerfEnergyBase
 
 //! @class  pimPerfEnergyBitFulcrum
 //! @brief  PIM performance energy model for Fulcrum family
 class pimPerfEnergyFulcrum : public pimPerfEnergyBase
 {
 public:
-  pimPerfEnergyFulcrum(const pimPerfEnergyModelParams& params) : pimPerfEnergyBase(params) {}
+  pimPerfEnergyFulcrum(const pimPerfEnergyModelParams &params) : pimPerfEnergyBase(params) {}
   virtual ~pimPerfEnergyFulcrum() {}
 
-  virtual pimeval::perfEnergy getPerfEnergyForFunc1(PimCmdEnum cmdType, const pimObjInfo& objSrc, const pimObjInfo& objDest) const override;
-  virtual pimeval::perfEnergy getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo& objSrc1, const pimObjInfo& objSrc2, const pimObjInfo& objDest) const override;
-  virtual pimeval::perfEnergy getPerfEnergyForReduction(PimCmdEnum cmdType, const pimObjInfo& obj, unsigned numPass) const override;
-  virtual pimeval::perfEnergy getPerfEnergyForBroadcast(PimCmdEnum cmdType, const pimObjInfo& obj) const override;
-  virtual pimeval::perfEnergy getPerfEnergyForRotate(PimCmdEnum cmdType, const pimObjInfo& obj) const override;
-  virtual pimeval::perfEnergy getPerfEnergyForPrefixSum(PimCmdEnum cmdType, const pimObjInfo& obj) const override;
+  virtual pimeval::perfEnergy getPerfEnergyForFunc1(PimCmdEnum cmdType, const pimObjInfo &objSrc, const pimObjInfo &objDest) const override;
+  virtual pimeval::perfEnergy getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo &objSrc1, const pimObjInfo &objSrc2, const pimObjInfo &objDest) const override;
+  virtual pimeval::perfEnergy getPerfEnergyForReduction(PimCmdEnum cmdType, const pimObjInfo &obj, unsigned numPass) const override;
+  virtual pimeval::perfEnergy getPerfEnergyForBroadcast(PimCmdEnum cmdType, const pimObjInfo &obj) const override;
+  virtual pimeval::perfEnergy getPerfEnergyForRotate(PimCmdEnum cmdType, const pimObjInfo &obj) const override;
+  virtual pimeval::perfEnergy getPerfEnergyForPrefixSum(PimCmdEnum cmdType, const pimObjInfo &obj) const override;
 
 protected:
   double m_fulcrumMulLatency = 0.00000609; // 6.09ns
@@ -36,8 +35,13 @@ protected:
   // Following values are taken from fulcrum paper.
   double m_fulcrumMulEnergy = 0.0000000004992329586; // mJ
   double m_fulcrumAddEnergy = 0.0000000001467846411; // mJ
-  double m_fulcrumShiftEnergy = 0.0000000075; // mJ
+  double m_fulcrumShiftEnergy = 0.0000000075;        // mJ
+
+  // oncnn mac block
+  double m_oncnnClkMs = 0.000001199;    // ASSUMPTION: PE runs at 834 MHz for OSSM and 909 MHz for OSPM. we are using OSSM for now.
+  double m_oncnnGroupEnergyMj = 1.9e-7; // ~190 pJ per 16-SOP run, from the on cnn paper's Table 6 power (45 nm)
+  double m_oncnnPEsPerCore = 1;
+  double m_oncnnPortBits = 8;
 };
 
 #endif
-

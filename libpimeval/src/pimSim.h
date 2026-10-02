@@ -16,24 +16,23 @@
 #include <cstdarg>
 #include <memory>
 
-
 //! @class  pimSim
 //! @brief  PIM simulator singleton class
 class pimSim
 {
 public:
-  static pimSim* get();
+  static pimSim *get();
   static void destroy();
 
   // Device creation and deletion
   bool createDevice(PimDeviceEnum deviceType, unsigned numRanks, unsigned numBankPerRank, unsigned numSubarrayPerBank, unsigned numRows, unsigned numCols, unsigned bufferSize);
-  bool createDeviceFromConfig(PimDeviceEnum deviceType, const char* configFileName);
-  bool getDeviceProperties(PimDeviceProperties* deviceProperties);
+  bool createDeviceFromConfig(PimDeviceEnum deviceType, const char *configFileName);
+  bool getDeviceProperties(PimDeviceProperties *deviceProperties);
   bool deleteDevice();
   bool isValidDevice(bool showMsg = true) const;
 
   // From pimSimConfig
-  const pimSimConfig& getConfig() const { return m_config; }
+  const pimSimConfig &getConfig() const { return m_config; }
   PimDeviceEnum getDeviceType() const { return m_config.getDeviceType(); }
   PimDeviceEnum getSimTarget() const { return m_config.getSimTarget(); }
   unsigned getNumRanks() const { return m_config.getNumRanks(); }
@@ -53,11 +52,15 @@ public:
   void endKernelTimer() const;
   void showStats() const;
   void resetStats() const;
-  pimStatsMgr* getStatsMgr() { return m_statsMgr.get(); }
-  const pimParamsDram& getParamsDram() const { assert(m_paramsDram); return *m_paramsDram; }
-  pimPerfEnergyBase* getPerfEnergyModel();
+  pimStatsMgr *getStatsMgr() { return m_statsMgr.get(); }
+  const pimParamsDram &getParamsDram() const
+  {
+    assert(m_paramsDram);
+    return *m_paramsDram;
+  }
+  pimPerfEnergyBase *getPerfEnergyModel();
 
-  pimUtils::threadPool* getThreadPool() { return m_threadPool.get(); }
+  pimUtils::threadPool *getThreadPool() { return m_threadPool.get(); }
 
   // Resource allocation and deletion
   PimObjId pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType dataType);
@@ -68,10 +71,10 @@ public:
   PimObjId pimCreateDualContactRef(PimObjId refId);
 
   // Data transfer
-  bool pimCopyMainToDevice(void* src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-  bool pimCopyDeviceToMain(PimObjId src, void* dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-  bool pimCopyMainToDeviceWithType(PimCopyEnum copyType, void* src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-  bool pimCopyDeviceToMainWithType(PimCopyEnum copyType, PimObjId src, void* dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimCopyMainToDevice(void *src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimCopyDeviceToMain(PimObjId src, void *dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimCopyMainToDeviceWithType(PimCopyEnum copyType, void *src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimCopyDeviceToMainWithType(PimCopyEnum copyType, PimObjId src, void *dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
   bool pimCopyDeviceToDevice(PimObjId src, PimObjId dest, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
   bool pimCopyObjectToObject(PimObjId src, PimObjId dest);
   bool pimConvertType(PimObjId src, PimObjId dest);
@@ -109,31 +112,33 @@ public:
   bool pimMax(PimObjId src, PimObjId dest, uint64_t scalarValue);
   bool pimScaledAdd(PimObjId src1, PimObjId src2, PimObjId dest, uint64_t scalarValue);
   bool pimPopCount(PimObjId src, PimObjId dest);
-  bool pimRedSum(PimObjId src, void* sum, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-  bool pimRedMin(PimObjId src, void* min, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
-  bool pimRedMax(PimObjId src, void* max, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimRedSum(PimObjId src, void *sum, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimRedMin(PimObjId src, void *min, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
+  bool pimRedMax(PimObjId src, void *max, uint64_t idxBegin = 0, uint64_t idxEnd = 0);
   bool pimBitSliceExtract(PimObjId src, PimObjId destBool, unsigned bitIdx);
   bool pimBitSliceInsert(PimObjId srcBool, PimObjId dest, unsigned bitIdx);
   bool pimCondCopy(PimObjId condBool, PimObjId src, PimObjId dest);
   bool pimCondBroadcast(PimObjId condBool, uint64_t scalarBits, PimObjId dest);
   bool pimCondSelect(PimObjId condBool, PimObjId src1, PimObjId src2, PimObjId dest);
   bool pimCondSelectScalar(PimObjId condBool, PimObjId src1, uint64_t scalarBits, PimObjId dest);
-  template <typename T> bool pimBroadcast(PimObjId dest, T value);
+  template <typename T>
+  bool pimBroadcast(PimObjId dest, T value);
   bool pimRotateElementsRight(PimObjId src);
   bool pimRotateElementsLeft(PimObjId src);
   bool pimShiftElementsRight(PimObjId src);
   bool pimShiftElementsLeft(PimObjId src);
   bool pimShiftBitsRight(PimObjId src, PimObjId dest, unsigned shiftAmount);
   bool pimShiftBitsLeft(PimObjId src, PimObjId dest, unsigned shiftAmount);
-  bool pimAesSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t>& lut); 
-  bool pimAesInverseSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t>& lut); 
+  bool pimAesSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t> &lut);
+  bool pimAesInverseSbox(PimObjId src, PimObjId dest, const std::vector<uint8_t> &lut);
   bool pimPrefixSum(PimObjId src, PimObjId dest);
-  bool pimMAC(PimObjId src1, PimObjId src2, void* dest);
+  bool pimMAC(PimObjId src1, PimObjId src2, void *dest);
 
   // on-cnn function signitures
   bool pimOSSM(PimObjId src1, PimObjId src2, PimObjId dest);
   bool pimOFC(PimObjId src, PimObjId dest);
-  bool pimOAReduce(PimObjId src, void* result);
+  bool pimOAReduce(PimObjId src, void *result);
+  bool pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest);
 
   // PIM API Fusion
   bool pimFuse(PimProg prog);
@@ -163,12 +168,12 @@ public:
 private:
   pimSim();
   ~pimSim();
-  pimSim(const pimSim&) = delete;
-  pimSim operator=(const pimSim&) = delete;
+  pimSim(const pimSim &) = delete;
+  pimSim operator=(const pimSim &) = delete;
   bool createDeviceCommon();
   void uninit();
 
-  static pimSim* s_instance;
+  static pimSim *s_instance;
   pimSimConfig m_config;
 
   // support one device for now
@@ -176,8 +181,6 @@ private:
   std::unique_ptr<pimParamsDram> m_paramsDram;
   std::unique_ptr<pimStatsMgr> m_statsMgr;
   std::unique_ptr<pimUtils::threadPool> m_threadPool;
-
 };
 
 #endif
-
