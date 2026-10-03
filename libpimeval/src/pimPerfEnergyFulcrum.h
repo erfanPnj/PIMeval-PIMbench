@@ -18,7 +18,16 @@
 class pimPerfEnergyFulcrum : public pimPerfEnergyBase
 {
 public:
-  pimPerfEnergyFulcrum(const pimPerfEnergyModelParams &params) : pimPerfEnergyBase(params) {}
+  pimPerfEnergyFulcrum(const pimPerfEnergyModelParams &params) : pimPerfEnergyBase(params)
+  {
+    // sweep knobs without recompiling
+    if (const char *s = std::getenv("ONCNN_PES_PER_CORE"))
+      m_oncnnPEsPerCore = std::max(1, std::atoi(s));
+    if (const char *s = std::getenv("ONCNN_PORT_BITS"))
+      m_oncnnPortBits = std::max(1, std::atoi(s));
+    if (const char *s = std::getenv("ONCNN_CLK_NS"))
+      m_oncnnClkMs = std::atof(s) * 1e-6; // ns -> ms
+  }
   virtual ~pimPerfEnergyFulcrum() {}
 
   virtual pimeval::perfEnergy getPerfEnergyForFunc1(PimCmdEnum cmdType, const pimObjInfo &objSrc, const pimObjInfo &objDest) const override;
@@ -37,11 +46,13 @@ protected:
   double m_fulcrumAddEnergy = 0.0000000001467846411; // mJ
   double m_fulcrumShiftEnergy = 0.0000000075;        // mJ
 
-  // oncnn mac block
-  double m_oncnnClkMs = 0.000001199;    // ASSUMPTION: PE runs at 834 MHz for OSSM and 909 MHz for OSPM. we are using OSSM for now.
-  double m_oncnnGroupEnergyMj = 1.9e-7; // ~190 pJ per 16-SOP run, from the on cnn paper's Table 6 power (45 nm)
-  double m_oncnnPEsPerCore = 1;
-  double m_oncnnPortBits = 8;
+  // ON-CNN PE block
+  double m_oncnnClkMs = 0.000001199;    // ASSUMPTION: 834 MHz (paper, 45 nm logic)
+  double m_oncnnGroupEnergyMj = 1.9e-7; // ~190 pJ per 16-SOP run (paper Table 6 power / 4096 PEs)
+  unsigned m_oncnnPa = 32;              // PE input precision (paper); independent of storage container
+  unsigned m_oncnnPEsPerCore = 2;       // k
+  unsigned m_oncnnPortBits = 64;        // total walker->PE bits per cycle, both operands (stock: 2 x 32)
+  bool m_oncnnChargeDestWrite = true;   // false = accumulator kept in PE register
 };
 
 #endif

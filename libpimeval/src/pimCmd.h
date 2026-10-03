@@ -473,12 +473,6 @@ private:
     case PimCmdEnum::MUL:
       result = operand1 * operand2;
       break;
-      // [ADD THIS BLOCK] - Handle Online Serial-Serial Multiplier functionally
-    case PimCmdEnum::OSSM:
-      // Functionally equivalent to multiplication, but hardware timing will differ
-      result = operand1 * operand2;
-      break;
-    // [/ADD THIS BLOCK]
     case PimCmdEnum::ONCNN_MAC:
       result = result + operand1 * operand2;
       break;
@@ -642,12 +636,12 @@ public:
   pimCmdReduction(PimCmdEnum cmdType, PimObjId src, void *result)
       : pimCmd(cmdType), m_src(src), m_result(result)
   {
-    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::OA_REDUCE);
+    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX);
   }
   pimCmdReduction(PimCmdEnum cmdType, PimObjId src, void *result, uint64_t idxBegin, uint64_t idxEnd)
       : pimCmd(cmdType), m_src(src), m_result(result), m_idxBegin(idxBegin)
   {
-    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::REDSUM_RANGE || cmdType == PimCmdEnum::REDMIN_RANGE || cmdType == PimCmdEnum::REDMAX_RANGE || cmdType == PimCmdEnum::OA_REDUCE);
+    assert(cmdType == PimCmdEnum::REDSUM || cmdType == PimCmdEnum::REDMIN || cmdType == PimCmdEnum::REDMAX || cmdType == PimCmdEnum::REDSUM_RANGE || cmdType == PimCmdEnum::REDMIN_RANGE || cmdType == PimCmdEnum::REDMAX_RANGE);
     if (idxEnd)
       m_idxEnd = idxEnd;
   }

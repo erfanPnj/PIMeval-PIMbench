@@ -707,6 +707,11 @@ bool pimCmdFunc2::execute()
     pimObjInfo &objSrc2 = m_device->getResMgr()->getObjInfo(m_src2);
     objSrc1.syncFromSimulatedMem();
     objSrc2.syncFromSimulatedMem();
+    if (m_cmdType == PimCmdEnum::ONCNN_MAC)
+    { // accumulator: dest is also an input
+      pimObjInfo &objDest = m_device->getResMgr()->getObjInfo(m_dest);
+      objDest.syncFromSimulatedMem();
+    }
   }
 
   const pimObjInfo &objSrc1 = m_device->getResMgr()->getObjInfo(m_src1);
@@ -808,6 +813,15 @@ bool pimCmdFunc2::sanityCheck() const
     std::printf("PIM-Error: PIM command %s src1 and dest must be of same data type\n", getName().c_str());
     return false;
   }
+  if (m_cmdType == PimCmdEnum::ONCNN_MAC)
+  {
+    if (objSrc1.getNumElements() % 16 != 0 || objSrc1.getMaxElementsPerRegion() % 16 != 0)
+    {
+      std::printf("PIM-Error: PIM command %s needs the element count (%lu) and the elements per region (%lu) to be multiples of 16 lanes\n",
+                  getName().c_str(), (unsigned long)objSrc1.getNumElements(), (unsigned long)objSrc1.getMaxElementsPerRegion());
+      return false;
+    }
+  }
 
   return true;
 }
@@ -836,6 +850,10 @@ bool pimCmdFunc2::computeRegion(unsigned index)
       int64_t operand1 = pimUtils::signExt(operandBits1, dataType);
       int64_t operand2 = pimUtils::signExt(operandBits2, dataType);
       int64_t result = 0;
+      if (m_cmdType == PimCmdEnum::ONCNN_MAC)
+      {
+        result = pimUtils::signExt(objDest.getElementBits(elemIdx), objDest.getDataType());
+      }
       if (!computeResult(operand1, operand2, m_cmdType, (int64_t)m_scalarValue, result))
         return false;
       objDest.setElement(elemIdx, result);
@@ -845,6 +863,10 @@ bool pimCmdFunc2::computeRegion(unsigned index)
       uint64_t unsignedOperand1 = objSrc1.getElementBits(elemIdx);
       uint64_t unsignedOperand2 = objSrc2.getElementBits(elemIdx);
       uint64_t result = 0;
+      if (m_cmdType == PimCmdEnum::ONCNN_MAC)
+      {
+        result = objDest.getElementBits(elemIdx);
+      }
       if (!computeResult(unsignedOperand1, unsignedOperand2, m_cmdType, m_scalarValue, result))
         return false;
       objDest.setElement(elemIdx, result);
@@ -856,6 +878,10 @@ bool pimCmdFunc2::computeRegion(unsigned index)
       float floatOperand1 = pimUtils::castBitsToType<float>(operandBits1);
       float floatOperand2 = pimUtils::castBitsToType<float>(operandBits2);
       float result = 0.0;
+      if (m_cmdType == PimCmdEnum::ONCNN_MAC)
+      {
+        result = pimUtils::castBitsToType<float>(objDest.getElementBits(elemIdx));
+      }
       if (!computeResultFP(floatOperand1, floatOperand2, m_cmdType, pimUtils::castBitsToType<float>(m_scalarValue), result))
         return false;
       if (objDest.getDataType() == PIM_BOOL)
