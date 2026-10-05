@@ -442,9 +442,10 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
 
   resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
 
-  // 1. Calculate the total number of available PEs in the simulator (all subarrays)
+  // 1. Calculate the total number of available PEs in the simulator 
   // groups that fit in one row of one core: 8192 cols / (16 lanes * 32 bits) = 16
-  int groupsPerRow = std::max(1, (int)deviceProp.numColPerSubarray / (kOnCnnLanes * 32));
+  const int kElemBits = 32;   // PIM_INT32 storage; change together with the pimAlloc type
+  int groupsPerRow = std::max(1, (int)deviceProp.numColPerSubarray / (kOnCnnLanes * kElemBits));
   // one call = one full row of groups on every core
   int maxAvailablePEs = deviceProp.numPIMCores * groupsPerRow;
 
