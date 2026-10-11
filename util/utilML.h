@@ -423,11 +423,6 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
     exit(1);
   }
 
-  // PEs per core, same variable the perf model reads
-  int pesPerCore = 1;
-  if (const char *s = std::getenv("ONCNN_PES_PER_CORE"))
-    pesPerCore = std::max(1, std::atoi(s));
-
   int inputDepth = inputMatrix.size();
   int inputHeight = inputMatrix[0].size();
   int inputWidth = inputMatrix[0][0].size();
@@ -447,16 +442,16 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
   const int kElemBits = 32;   // PIM_INT32 storage; change together with the pimAlloc type
   int groupsPerRow = std::max(1, (int)deviceProp.numColPerSubarray / (kOnCnnLanes * kElemBits));
   // one call = one full row of groups on every core
-  int maxAvailablePEs = deviceProp.numPIMCores * groupsPerRow;
+  int groupsPerCall = deviceProp.numPIMCores * groupsPerRow; // max available PEs
 
   // 2. Dynamically calculate the dimensions of the architecture grid (maximum utilization strategy)
   int stepF = kernelDepth;             // First, try to parallelize all filters
-  int stepW = maxAvailablePEs / stepF; // Allocate the remaining capacity to the windows
+  int stepW = groupsPerCall / stepF; // Allocate the remaining capacity to the windows
 
   if (stepW == 0)
   {
     // If the number of filters exceeds the total number of PEs, limit the filters to the number of available PEs
-    stepF = maxAvailablePEs;
+    stepF = groupsPerCall;
     stepW = 1;
   }
   else if (stepW > totalWindows)
@@ -484,7 +479,7 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
     {
       int currentFilters = std::min(stepF, kernelDepth - f);
 
-      // Number of active PEs in this cycle (never exceeds maxAvailablePEs)
+      // Number of active PEs in this cycle (never exceeds groupsPerCall)
       int activePEs = currentFilters * currentW;
 
       for (int c = 0; c < inputDepth; c += M)

@@ -50,7 +50,7 @@ protected:
   double m_oncnnClkMs = 0.000001199;    // ASSUMPTION: 834 MHz (paper, 45 nm logic)
   double m_oncnnGroupEnergyMj = 1.9e-7; // ~190 pJ per 16-SOP run (paper Table 6 power / 4096 PEs)
   unsigned m_oncnnPa = 32;              // PE input precision (paper); independent of storage container
-  unsigned m_oncnnPEsPerCore = 2;       // k
+  unsigned m_oncnnPEsPerCore = 4;       // k
   unsigned m_oncnnPortBits = 64;        // total walker->PE bits per cycle, both operands (stock: 2 x 32)
   bool m_oncnnChargeDestWrite = true;   // false = accumulator kept in PE register
 };
