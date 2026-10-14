@@ -24,6 +24,7 @@
 #include <sstream>
 #if defined(COMPILE_WITH_JPEG)
 #include <jpeglib.h>
+#include <functional>
 #endif
 using namespace std;
 
@@ -291,41 +292,72 @@ void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<s
   pimFree(ofcOutputObj);
 }
 
+// ===================== ON-CNN dataflow (Shafique & Lee, IEEE Access 2024) =====================
 constexpr int kOnCnnLanes = 16; // M: multipliers per PE
+constexpr int kOnCnnCols = 16;  // C: IFM windows processed in parallel (paper, Sec. IV-A)
 
-void performConvONCNN_Batched(std::vector<std::vector<int>> &batchedFilter, std::vector<std::vector<int>> &batchedIFM, std::vector<int> &outputMatrix, int numRequiredPIMRows, int activePEs)
+inline long oncnnEnvLong(const char *name, long def)
 {
-  // one 16-lane group per PE; unused lanes stay zero (idle multipliers)
-  const int vectorLength = activePEs * kOnCnnLanes;
+  const char *s = std::getenv(name);
+  return (s && *s) ? std::atol(s) : def;
+}
+// Must match ONCNN_PES_PER_CORE used by the perf model (default 4)
+inline int oncnnPEsPerCore() { return (int)std::max(1L, oncnnEnvLong("ONCNN_PES_PER_CORE", 4)); }
+inline uint64_t oncnnCeilDiv(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
+
+// Paper Eq. 7 with delta_A = 2, ceil(log2 M) = 4:  C_SOP = dM + 2*4 + 2*Pa + 4
+inline uint64_t oncnnCsop()
+{
+  const long dM = std::max(0L, oncnnEnvLong("ONCNN_DELTA_M", 3));
+  const long Pa = std::max(1L, oncnnEnvLong("ONCNN_PA", 16));
+  return (uint64_t)(dM + 2 * 4 + 2 * Pa + 4);
+}
+
+// Paper Eq. 10 for a PE pool of numPEs PEs arranged as (numPEs/C) filters x C windows
+inline uint64_t oncnnEq10Cycles(uint64_t Cout, uint64_t Hout, uint64_t Wout, uint64_t Cin,
+                                uint64_t Hf, uint64_t Wf, uint64_t numPEs)
+{
+  const uint64_t cols = std::min<uint64_t>(kOnCnnCols, numPEs);
+  const uint64_t rowsF = std::max<uint64_t>(1, numPEs / cols); // T x R
+  return oncnnCeilDiv(Cout, rowsF) * oncnnCeilDiv(Hout * Wout, cols) *
+         (oncnnCsop() + 1) * oncnnCeilDiv(Cin * Hf * Wf, kOnCnnLanes);
+}
+
+// One pass of the PE grid over one (filter block, window block).
+// fillChunk(chunk, ifm, flt) fills the 16-lane operands of every PE for run number `chunk`.
+// Each chunk is one pimONCNNMac call = one PE run (C_SOP + 1 cycles) on every PE.
+bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, std::vector<int> &)> &fillChunk,
+                              int numChunks, int activePEs, std::vector<int> &outputMatrix)
+{
+  const int vectorLength = activePEs * kOnCnnLanes; // one 16-lane group per PE
   outputMatrix.assign(activePEs, 0);
 
   PimObjId accObject = pimAlloc(PIM_ALLOC_AUTO, vectorLength, PIM_INT32);
   if (accObject == -1)
   {
     std::cout << "Function: " << __func__ << " Abort: pimAlloc failed" << std::endl;
-    return;
+    return false;
   }
   PimObjId ifmObject = pimAllocAssociated(accObject, PIM_INT32);
   PimObjId filterObject = pimAllocAssociated(accObject, PIM_INT32);
   if (ifmObject == -1 || filterObject == -1)
   {
     std::cout << "Function: " << __func__ << " Abort: pimAllocAssociated failed" << std::endl;
-    if (ifmObject != -1)
-      pimFree(ifmObject);
-    if (filterObject != -1)
-      pimFree(filterObject);
+    if (ifmObject != -1) pimFree(ifmObject);
+    if (filterObject != -1) pimFree(filterObject);
     pimFree(accObject);
-    return;
+    return false;
   }
 
-  std::vector<int> zeroInit(vectorLength, 0);
+  std::vector<int> ifmVec(vectorLength), fltVec(vectorLength), zeroInit(vectorLength, 0);
   pimCopyHostToDevice((void *)zeroInit.data(), accObject);
 
-  // loop H_f * W_f times (e.g. 9 for a 3x3 filter)
-  for (int i = 0; i < numRequiredPIMRows; i++)
+  // Algorithm 3 innermost loop: ceil(Cin*Hf*Wf / M) runs per PE
+  for (int chunk = 0; chunk < numChunks; ++chunk)
   {
-    pimCopyHostToDevice((void *)batchedIFM[i].data(), ifmObject);
-    pimCopyHostToDevice((void *)batchedFilter[i].data(), filterObject);
+    fillChunk(chunk, ifmVec, fltVec);
+    pimCopyHostToDevice((void *)ifmVec.data(), ifmObject);
+    pimCopyHostToDevice((void *)fltVec.data(), filterObject);
     pimONCNNMac(ifmObject, filterObject, accObject);
   }
 
@@ -344,265 +376,125 @@ void performConvONCNN_Batched(std::vector<std::vector<int>> &batchedFilter, std:
   pimFree(accObject);
   pimFree(ifmObject);
   pimFree(filterObject);
+  return true;
 }
 
-void aggregateConv(std::vector<int> &inputVector, std::vector<int> &outputVector, unsigned hopSize)
-{
-
-  uint64_t numChunks = inputVector.size() / hopSize;
-  uint64_t remChunk = numChunks;
-  while (remChunk > 1)
-  {
-    uint64_t reduceChunks = remChunk;
-    std::vector<int> tempVector(hopSize, 0);
-
-    // If remChunk is odd, save the last chunk and exclude from current level reduction
-    if (remChunk % 2)
-    {
-      std::copy(inputVector.end() - hopSize, inputVector.end(), tempVector.begin());
-      reduceChunks = remChunk - 1;
-    }
-
-    uint64_t length = (reduceChunks / 2) * hopSize;
-
-    PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, length, PIM_INT32);
-    PimObjId dstObj = pimAllocAssociated(srcObj, PIM_INT32);
-
-    if (srcObj == -1 || dstObj == -1)
-    {
-      std::cerr << "Function: " << __func__ << "Abort: pimAlloc failed\n";
-      return;
-    }
-
-    pimCopyHostToDevice((void *)inputVector.data(), srcObj);            // left halves
-    pimCopyHostToDevice((void *)(inputVector.data() + length), dstObj); // right halves
-
-    pimAdd(srcObj, dstObj, dstObj);
-    inputVector.resize(length);
-    pimCopyDeviceToHost(dstObj, inputVector.data());
-
-    pimFree(srcObj);
-    pimFree(dstObj);
-
-    // If we saved a leftover chunk, add it to the result
-    if (reduceChunks != remChunk)
-    {
-      PimObjId finalSrc = pimAlloc(PIM_ALLOC_AUTO, hopSize, PIM_INT32);
-      PimObjId finalDst = pimAllocAssociated(finalSrc, PIM_INT32);
-
-      if (finalSrc == -1 || finalDst == -1)
-      {
-        std::cerr << "Function: " << __func__ << "Abort: final PIM alloc failed\n";
-        return;
-      }
-
-      pimCopyHostToDevice(inputVector.data(), finalSrc);
-      pimCopyHostToDevice(tempVector.data(), finalDst);
-      pimAdd(finalSrc, finalDst, finalDst);
-      pimCopyDeviceToHost(finalDst, inputVector.data());
-
-      pimFree(finalSrc);
-      pimFree(finalDst);
-    }
-    remChunk = reduceChunks / 2;
-  }
-  outputVector = inputVector;
-}
-
-// Function executing the convolution between a 3D input matrix and a 3D kernel based on a given stride and padding.
-// For each kernel filter, the input matrix is decomposed based on the kernel dimensions and stride, merged together.
-// The merged matrix is then passed to performConv() function along with the kernel to peform the convolution on PIM.
-// The result (1D vector) from the PIM is then  reconstructed back to a 2D final result matrix for each filter.
-void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<int>>> &kernelMatrix, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
+// Core ON-CNN convolution. weightAt(f, c, r, s) returns weight of filter f, channel c, row r, col s.
+void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrix,
+                int kernelDepth, int kernelHeight, int kernelWidth,
+                const std::function<int(int, int, int, int)> &weightAt,
+                std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
 {
   PimDeviceProperties deviceProp;
-  PimStatus status = pimGetDeviceProperties(&deviceProp);
-  if (status != PIM_OK)
+  if (pimGetDeviceProperties(&deviceProp) != PIM_OK)
   {
     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
     exit(1);
   }
-
-  int inputDepth = inputMatrix.size();
-  int inputHeight = inputMatrix[0].size();
-  int inputWidth = inputMatrix[0][0].size();
-  int kernelDepth = kernelMatrix.size();
-  int kernelHeight = kernelMatrix[0].size();
-  int kernelWidth = kernelMatrix[0][0].size();
-
-  int outMatRow = std::floor((inputHeight - kernelHeight) / stride) + 1;
-  int outMatCol = std::floor((inputWidth - kernelWidth) / stride) + 1;
-  int totalWindows = outMatRow * outMatCol;     // H_out * W_out
-  int numOfPIMRow = kernelHeight * kernelWidth; // H_f * W_f
-
-  resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
-
-  // 1. Calculate the total number of available PEs in the simulator 
-  // groups that fit in one row of one core: 8192 cols / (16 lanes * 32 bits) = 16
-  const int kElemBits = 32;   // PIM_INT32 storage; change together with the pimAlloc type
-  int groupsPerRow = std::max(1, (int)deviceProp.numColPerSubarray / (kOnCnnLanes * kElemBits));
-  // one call = one full row of groups on every core
-  int groupsPerCall = deviceProp.numPIMCores * groupsPerRow; // max available PEs
-
-  // 2. Dynamically calculate the dimensions of the architecture grid (maximum utilization strategy)
-  int stepF = kernelDepth;             // First, try to parallelize all filters
-  int stepW = groupsPerCall / stepF; // Allocate the remaining capacity to the windows
-
-  if (stepW == 0)
+  // 16-lane groups must not straddle a row region (32-bit elements)
+  if (deviceProp.numColPerSubarray % (kOnCnnLanes * 32) != 0)
   {
-    // If the number of filters exceeds the total number of PEs, limit the filters to the number of available PEs
-    stepF = groupsPerCall;
-    stepW = 1;
-  }
-  else if (stepW > totalWindows)
-  {
-    // There is no need to allocate space for more than the total number of image windows
-    stepW = totalWindows;
+    std::cout << "Abort: numColPerSubarray must be a multiple of 512 for ON-CNN 16-lane groups" << std::endl;
+    exit(1);
   }
 
-  // The number of multipliers within each PE is fixed (according to the architecture)
-  int M = 16;
+  const int inputDepth = inputMatrix.size(); // Cin
+  const int inputHeight = inputMatrix[0].size();
+  const int inputWidth = inputMatrix[0][0].size();
+  const int outMatRow = (inputHeight + 2 * padding - kernelHeight) / stride + 1;
+  const int outMatCol = (inputWidth + 2 * padding - kernelWidth) / stride + 1;
+  const int totalWindows = outMatRow * outMatCol; // H_out * W_out
+  const int K = inputDepth * kernelHeight * kernelWidth;        // flattened reduction length
+  const int numChunks = (K + kOnCnnLanes - 1) / kOnCnnLanes;    // ceil(Cin*Hf*Wf / M)
 
-  std::vector<std::vector<std::vector<int>>> allDecompMats(inputDepth);
-  for (int c = 0; c < inputDepth; c++)
+  resultMatrix.assign(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
+
+  // PE pool: k PEs per PIM core. Grid = (T*R filters) x (C windows), as in the paper.
+  const uint64_t numPEs = (uint64_t)deviceProp.numPIMCores * oncnnPEsPerCore();
+  const int cols = (int)std::min<uint64_t>(kOnCnnCols, numPEs);   // C
+  const int rowsF = (int)std::max<uint64_t>(1, numPEs / cols);    // T x R
+
+  // Algorithm 3 / Eq. 6 loops: filter blocks, window blocks, chunks (inside performConvONCNN_Batched)
+  for (int f0 = 0; f0 < kernelDepth; f0 += rowsF)
   {
-    decomposeMatrix(inputHeight, inputWidth, kernelHeight, kernelWidth, stride, 0, inputMatrix[c], allDecompMats[c]);
-  }
-
-  // Iterate over windows with a dynamic step size (stepW)
-  for (int w = 0; w < totalWindows; w += stepW)
-  {
-    int currentW = std::min(stepW, totalWindows - w);
-
-    // Iterate over filters with a dynamic step size (stepF)
-    for (int f = 0; f < kernelDepth; f += stepF)
+    const int curF = std::min(rowsF, kernelDepth - f0);
+    for (int w0 = 0; w0 < totalWindows; w0 += cols)
     {
-      int currentFilters = std::min(stepF, kernelDepth - f);
+      const int curW = std::min(cols, totalWindows - w0);
+      const int activePEs = curF * curW; // PE index = filter * curW + window
 
-      // Number of active PEs in this cycle (never exceeds groupsPerCall)
-      int activePEs = currentFilters * currentW;
-
-      for (int c = 0; c < inputDepth; c += M)
+      auto fill = [&](int chunk, std::vector<int> &ifm, std::vector<int> &flt)
       {
-        int currentM = std::min(M, inputDepth - c);
-        int numRequiredRows = numOfPIMRow;
-        int vectorLength = activePEs * kOnCnnLanes; // pad every PE to 16 lanes
-
-        std::vector<std::vector<int>> batchedIFM(numRequiredRows, std::vector<int>(vectorLength, 0));
-        std::vector<std::vector<int>> batchedFilter(numRequiredRows, std::vector<int>(vectorLength, 0));
-
-        // loop on filter's pixels
-        for (int idx = 0; idx < numOfPIMRow; idx++)
+        // flat index kk = pixel * Cin + channel -> 16 lanes = 16 consecutive channels of a pixel
+        int laneCh[kOnCnnLanes], laneKr[kOnCnnLanes], laneKc[kOnCnnLanes];
+        int validLanes = 0;
+        for (int l = 0; l < kOnCnnLanes; ++l)
         {
-          int k_r = idx / kernelWidth;
-          int k_c = idx % kernelWidth;
-
-          for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++)
+          const int kk = chunk * kOnCnnLanes + l;
+          if (kk >= K) break;
+          const int pix = kk / inputDepth;
+          laneCh[l] = kk % inputDepth;
+          laneKr[l] = pix / kernelWidth;
+          laneKc[l] = pix % kernelWidth;
+          ++validLanes;
+        }
+        std::fill(ifm.begin(), ifm.end(), 0); // unused lanes stay zero (idle multipliers)
+        std::fill(flt.begin(), flt.end(), 0);
+        for (int pe = 0; pe < activePEs; ++pe)
+        {
+          const int filt = f0 + pe / curW;
+          const int win = w0 + pe % curW;
+          const int oh = win / outMatCol, ow = win % outMatCol;
+          for (int l = 0; l < validLanes; ++l)
           {
-            int actualF = f + filt_idx;
-            for (int win_idx = 0; win_idx < currentW; win_idx++)
-            {
-              int pe_idx = filt_idx * currentW + win_idx;
-
-              for (int m_idx = 0; m_idx < currentM; m_idx++)
-              {
-                // put M channels of a pixel next to each other so they go to correct PE together
-                int vector_idx = pe_idx * kOnCnnLanes + m_idx; // lanes currentM..15 stay 0
-
-                batchedIFM[idx][vector_idx] = allDecompMats[c + m_idx][idx][w + win_idx];
-                batchedFilter[idx][vector_idx] = kernelMatrix[actualF][k_r][k_c];
-              }
-            }
+            const int idx = pe * kOnCnnLanes + l;
+            const int ih = oh * stride + laneKr[l] - padding;
+            const int iw = ow * stride + laneKc[l] - padding;
+            flt[idx] = weightAt(filt, laneCh[l], laneKr[l], laneKc[l]);
+            if (ih >= 0 && ih < inputHeight && iw >= 0 && iw < inputWidth)
+              ifm[idx] = inputMatrix[laneCh[l]][ih][iw];
           }
         }
+      };
 
-        std::vector<int> outVector;
-        performConvONCNN_Batched(batchedFilter, batchedIFM, outVector, numRequiredRows, activePEs);
-        // Reconstruct the output in the image matrix
-        for (int filt_idx = 0; filt_idx < currentFilters; filt_idx++)
-        {
-          int actualF = f + filt_idx;
-          for (int win_idx = 0; win_idx < currentW; win_idx++)
-          {
-            int pe_idx = filt_idx * currentW + win_idx;
-            int global_win_idx = w + win_idx;
-            int r_idx = global_win_idx / outMatCol;
-            int c_idx = global_win_idx % outMatCol;
+      std::vector<int> outVector;
+      if (!performConvONCNN_Batched(fill, numChunks, activePEs, outVector))
+        return;
 
-            resultMatrix[actualF][r_idx][c_idx] += outVector[pe_idx];
-          }
-        }
+      for (int pe = 0; pe < activePEs; ++pe)
+      {
+        const int filt = f0 + pe / curW;
+        const int win = w0 + pe % curW;
+        resultMatrix[filt][win / outMatCol][win % outMatCol] = outVector[pe];
       }
     }
   }
+
+  if (std::getenv("ONCNN_PRINT_EQ10"))
+  {
+    const uint64_t cyc = oncnnEq10Cycles(kernelDepth, outMatRow, outMatCol, inputDepth,
+                                         kernelHeight, kernelWidth, numPEs);
+    const double clkNs = std::getenv("ONCNN_CLK_NS") ? std::atof(std::getenv("ONCNN_CLK_NS")) : 1.2;
+    std::cout << "ON-CNN Eq.10 expected: " << cyc << " cycles = " << cyc * clkNs * 1e-6
+              << " ms (PEs=" << numPEs << ", grid " << rowsF << "x" << cols << ")" << std::endl;
+  }
 }
-// void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<int>>> &kernelMatrix, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
-// {
-//   PimDeviceProperties deviceProp;
-//   PimStatus status = pimGetDeviceProperties(&deviceProp);
-//   if (status != PIM_OK) {
-//     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
-//     exit(1);
-//   }
-//   // Get the device parameters
-//   uint64_t numCols = deviceProp.numColPerSubarray;
-//   uint64_t numRows = deviceProp.numRowPerSubarray;
-//   uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;
 
-//   int inputDepth = inputMatrix.size();
-//   int inputHeight = inputMatrix[0].size();
-//   int inputWidth = inputMatrix[0][0].size();
-//   int kernelDepth = kernelMatrix.size();
-//   int kernelHeight = kernelMatrix[0].size();
-//   int kernelWidth = kernelMatrix[0][0].size();
+// Existing signature (2D kernel per filter shared across channels, as the CSV loaders produce)
+void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<int>>> &kernelMatrix, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
+{
+  conv2ONCNN(inputMatrix, kernelMatrix.size(), kernelMatrix[0].size(), kernelMatrix[0][0].size(),
+             [&](int f, int, int r, int s) { return kernelMatrix[f][r][s]; },
+             resultMatrix, stride, padding);
+}
 
-//   int outMatRow = std::floor((inputHeight - kernelHeight) / stride) + 1;
-//   int outMatCol = std::floor((inputWidth - kernelWidth) / stride) + 1;
-//   int numOfMatPerRow = floor((1.0 * numOfBits) / (outMatRow * outMatCol)) <  inputDepth ? floor((1.0 * numOfBits) / (outMatRow * outMatCol)) : inputDepth;
-//   int numOfPIMRow = kernelHeight * kernelWidth;
-
-//   resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol)));
-
-//   for (int i = 0; i < kernelDepth; i++)
-//   {
-//     int tempcol = 0;
-//     std::vector<int> dstVec(outMatRow * outMatCol);
-//     std::vector<int> outVector(outMatRow * outMatCol * inputDepth, 0);
-//     for (int j = 0; j < inputDepth; j += numOfMatPerRow)
-//     {
-//       int matChunk = (numOfMatPerRow + j) <= inputDepth ? (numOfMatPerRow + j) : inputDepth;
-
-//       std::vector<std::vector<int>> mergedMat(numOfPIMRow);
-//       for (int k = j; k < matChunk; k++)
-//       {
-//         std::vector<std::vector<int>> decompMat;
-//         decomposeMatrix(inputHeight, inputWidth, kernelMatrix[i].size(), kernelMatrix[i][0].size(), stride, 0, inputMatrix[k], decompMat);
-//         // Merge the matrices
-//         for (uint64_t idx = 0; idx < mergedMat.size(); idx++) {
-//           mergedMat[idx].insert(mergedMat[idx].end(),
-//                                 std::make_move_iterator(decompMat[idx].begin()),
-//                                 std::make_move_iterator(decompMat[idx].end()));
-//         }
-//         tempcol = mergedMat[0].size();
-//       }
-
-//       // [تغییر اصلی: فراخوانی پایپ‌لاین ON-CNN به جای کانوولوشن عادی]
-//       // در اینجا کل ۵۰,۱۷۶ پنجره را یکجا به شبیه‌ساز می‌دهیم تا خودش روی ۴۰۹۶ هسته پخشش کند!
-//       performConvONCNN(kernelMatrix[i], mergedMat, outVector, numOfPIMRow, tempcol);
-//     }
-//     int hopSize = outMatCol * outMatRow;
-//     aggregateConv(outVector, dstVec, hopSize);
-
-//     int ddx = 0;
-//     for (int rdx = 0; rdx < outMatRow; ++rdx)
-//     {
-//       for (int cdx = 0; cdx < outMatCol; ++cdx)
-//       {
-//         resultMatrix[i][rdx][cdx] = dstVec[ddx++];
-//       }
-//     }
-//   }
-// }
+// True 4D filters [Cout][Cin][Hf][Wf], as in the paper
+void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<std::vector<int>>>> &kernel4D, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
+{
+  conv2ONCNN(inputMatrix, kernel4D.size(), kernel4D[0][0].size(), kernel4D[0][0][0].size(),
+             [&](int f, int c, int r, int s) { return kernel4D[f][c][r][s]; },
+             resultMatrix, stride, padding);
+}
 
 // This should work for bitSIMD or any PIM that requires vertical data layout.
 // Perform the Max Pool operation in PIM for the given input matrix.

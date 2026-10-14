@@ -176,17 +176,20 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     totalOp = obj.getNumElements();
     break;
   }
-  case PimCmdEnum::ONCNN_MAC:
+    case PimCmdEnum::ONCNN_MAC:
   {
+    // One call = one "wave" of 16-SOP runs on every PE. Cycle count follows the paper:
+    //   Eq. 7 : C_SOP = dM + dA*ceil(log2 M) + 2*Pa + ceil(log2 M)
+    //   Eq. 8 : one PE run = C_SOP + 1 cycles (the +1 is the reset cycle)
+    // The host calls this once per chunk of M=16 flattened (Cin*Hf*Wf) elements, so summed over
+    // all calls the total equals Eq. 10 / Eq. 9: (C_SOP + 1) * ceil(Cin*Hf*Wf / M) per PE pass.
     constexpr uint64_t kLanes = 16;  // M: multipliers per PE
-    constexpr unsigned kDeltaM = 3;  // OSSM online delay (2 for OSPM)
-    constexpr unsigned kDeltaA = 2;  // OA online delay
-    constexpr unsigned kTreeLvl = 4; // log2(16)
+    constexpr unsigned kTreeLvl = 4; // ceil(log2(M))
 
-    // One PE run = 16 SOPs: paper Eq. 7 + 1 reset cycle (48 cycles at Pa = 16)
-    const unsigned cyclesPerGroup = kDeltaM + kDeltaA * kTreeLvl + 2 * m_oncnnPa + kTreeLvl + 1;
+    const unsigned cSop = m_oncnnDeltaM + m_oncnnDeltaA * kTreeLvl + 2 * m_oncnnPa + kTreeLvl;
+    const unsigned cyclesPerGroup = cSop + 1;
 
-    // Work in groups: 16 adjacent elements = one PE run (conv2 pads every PE to 16 lanes)
+    // 16 adjacent elements = one PE run
     const uint64_t totalGroups = (obj.getNumElements() + kLanes - 1) / kLanes;
     const uint64_t groupsPerRegionMax = std::max<uint64_t>(1, maxElementsPerRegion / kLanes);
     const uint64_t numCoresAvail = obj.getNumCoreAvailable();
@@ -194,40 +197,44 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     uint64_t activeCores, groupsPerCore, passes;
     if (obj.isLoadBalanced())
     {
+      // same convention as the other Fulcrum models: data is spread evenly over the cores
       activeCores = std::min<uint64_t>(numCoresAvail, totalGroups);
       groupsPerCore = (totalGroups + activeCores - 1) / activeCores;
       passes = (groupsPerCore + groupsPerRegionMax - 1) / groupsPerRegionMax;
     }
     else
     {
+      // physical packing (full-width regions): the busiest core decides the time
       activeCores = obj.getNumCoresUsed();
       passes = numPass;
       groupsPerCore = std::min<uint64_t>(passes * groupsPerRegionMax, totalGroups);
     }
 
-    // k PEs share the core's walkers; they split the groups
+    // k PEs of a core share its walkers and split the core's groups into waves
     const uint64_t k = std::max<uint64_t>(1, std::min<uint64_t>(m_oncnnPEsPerCore, groupsPerCore));
-    const double computeCycles = std::ceil((double)groupsPerCore / k) * cyclesPerGroup;
+    const double waves = std::ceil((double)groupsPerCore / (double)k);
+    double cycles = waves * cyclesPerGroup;
 
-    // walker -> PE transfer through one shared port (IFM + filter bits as stored in the row)
+    // optional (off by default): walker -> PE port bandwidth limit
     const double bitsPerGroup = 2.0 * kLanes * bitsPerElement;
-    const double portCycles = groupsPerCore * std::ceil(bitsPerGroup / m_oncnnPortBits);
+    if (m_oncnnPortBits > 0)
+    {
+      const double portCycles = groupsPerCore * std::ceil(bitsPerGroup / m_oncnnPortBits);
+      cycles = std::max(cycles, portCycles);
+    }
 
-    // shadow PISO: loads overlap compute, so the slower of the two limits the core
-    const double cycles = std::max(computeCycles, portCycles);
-
-    // Row terms: per pass, like ADD (2 source reads, 1 dest write)
-    msRead = 2 * m_tR * passes;
-    msWrite = m_oncnnChargeDestWrite ? m_tW * passes : 0.0;
+    // optional (off by default): DRAM row access time, which Eq. 10 does not contain
+    msRead = m_oncnnChargeRowAccess ? 2 * m_tR * passes : 0.0;
+    msWrite = (m_oncnnChargeRowAccess && m_oncnnChargeDestWrite) ? m_tW * passes : 0.0;
     msALU = cycles * m_oncnnClkMs;
     msRuntime = msRead + msWrite + msALU;
 
-    // Energy: row activations + walker shifts + PE energy + background
+    // Energy: row activations + walker shifts + PE energy + background (unchanged)
     const double rowOpsPerPass = m_oncnnChargeDestWrite ? 3.0 : 2.0;
     const double wordsPerGroup = std::ceil(bitsPerGroup / m_fulcrumAluBitWidth) + 1; // +1 result word
     mjEnergy = activeCores * passes * rowOpsPerPass * m_eAP;
     mjEnergy += totalGroups * wordsPerGroup * m_fulcrumShiftEnergy;
-    mjEnergy += totalGroups * m_oncnnGroupEnergyMj; // work is conserved: actual groups only
+    mjEnergy += totalGroups * m_oncnnGroupEnergyMj;
     mjEnergy += m_pBChip * m_numChipsPerRank * m_numRanks * msRuntime;
 
     totalOp = obj.getNumElements() * 2; // multiply + add per element
