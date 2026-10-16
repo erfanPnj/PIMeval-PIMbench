@@ -68,7 +68,7 @@ protected:
   unsigned m_oncnnDeltaA = 2;           // delta_A: online adder delay
   unsigned m_oncnnPa = 16;              // Pa: activation precision in bits (paper: 16)
   unsigned m_oncnnPEsPerCore = 4;       // k
-  unsigned m_oncnnPortBits = 0;         // 0 = ideal (paper); >0 limits walker->PE bits per cycle
+  unsigned m_oncnnPortBits = 64;         // 0 = ideal (paper); >0 limits walker->PE bits per cycle
   bool m_oncnnChargeRowAccess = true;  // false = paper-exact Eq. 10 (no DRAM row time)
   bool m_oncnnChargeDestWrite = true;   // only used when m_oncnnChargeRowAccess / energy
 };

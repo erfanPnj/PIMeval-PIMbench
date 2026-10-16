@@ -332,6 +332,8 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   const int vectorLength = activePEs * kOnCnnLanes; // one 16-lane group per PE
   outputMatrix.assign(activePEs, 0);
 
+  // TODO: Create a new allocation function inside resourse manager for allocating M elements to 1 element of another allocated memory space
+  // Also check if you need to pimAlloc accObject or one of filter or window objects
   PimObjId accObject = pimAlloc(PIM_ALLOC_AUTO, vectorLength, PIM_INT32);
   if (accObject == -1)
   {
