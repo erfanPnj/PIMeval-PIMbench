@@ -4,47 +4,46 @@
 // This file is licensed under the MIT License.
 // See the LICENSE file in the root of this repository for more details.
 
-#include "pimResMgr.h"       // for pimResMgr
-#include "pimDevice.h"       // for pimDevice
-#include <cstdio>            // for printf
-#include <algorithm>         // for sort, prev
-#include <stdexcept>         // for throw, invalid_argument
-#include <memory>            // for make_unique
-#include <cassert>           // for assert
-#include <string>            // for string
-
+#include "pimResMgr.h" // for pimResMgr
+#include "pimDevice.h" // for pimDevice
+#include <cstdio>      // for printf
+#include <algorithm>   // for sort, prev
+#include <stdexcept>   // for throw, invalid_argument
+#include <memory>      // for make_unique
+#include <cassert>     // for assert
+#include <string>      // for string
 
 //! @brief  Print info of a PIM region
-void
-pimRegion::print(uint64_t regionId) const
+void pimRegion::print(uint64_t regionId) const
 {
   printf("{ PIM-Region %lu: CoreId = %d, Loc = (%u, %u), Size = (%u, %u) }\n",
          regionId, m_coreId, m_rowIdx, m_colIdx, m_numAllocRows, m_numAllocCols);
 }
 
 //! @brief  Print info of a PIM object
-void
-pimObjInfo::print() const
+void pimObjInfo::print() const
 {
   std::printf("----------------------------------------\n");
   std::printf("PIM-Object: ObjId = %d, AllocType = %d, Regions =\n",
               m_objId, static_cast<int>(m_allocType));
-  for (size_t i = 0; i < m_regions.size(); ++i) {
+  for (size_t i = 0; i < m_regions.size(); ++i)
+  {
     m_regions[i].print(i);
   }
   std::printf("----------------------------------------\n");
 }
 
 //! @brief  Finalize obj info
-void
-pimObjInfo::finalize()
+void pimObjInfo::finalize()
 {
   std::unordered_map<PimCoreId, int> coreIdCnt;
-  for (const auto& region : m_regions) {
+  for (const auto &region : m_regions)
+  {
     PimCoreId coreId = region.getCoreId();
     coreIdCnt[coreId]++;
     unsigned numRegionsPerCore = coreIdCnt[coreId];
-    if (m_maxNumRegionsPerCore < numRegionsPerCore) {
+    if (m_maxNumRegionsPerCore < numRegionsPerCore)
+    {
       m_maxNumRegionsPerCore = numRegionsPerCore;
     }
   }
@@ -52,7 +51,7 @@ pimObjInfo::finalize()
   m_numCoreAvailable = m_device->getNumCores();
   m_isLoadBalanced = m_device->getConfig().isLoadBalanced();
 
-  const pimRegion& region = m_regions[0];
+  const pimRegion &region = m_regions[0];
   m_maxElementsPerRegion = (uint64_t)region.getNumAllocRows() * region.getNumAllocCols() / m_bitsPerElementPadded;
   m_numColsPerElem = region.getNumColsPerElem();
 }
@@ -61,15 +60,16 @@ pimObjInfo::finalize()
 unsigned
 pimObjInfo::getBitsPerElement(PimBitWidth bitWidthType) const
 {
-  switch (bitWidthType) {
-    case PimBitWidth::ACTUAL:
-    case PimBitWidth::SIM:
-    case PimBitWidth::HOST:
-      return pimUtils::getNumBitsOfDataType(m_dataType, bitWidthType);
-    case PimBitWidth::PADDED:
-      return m_bitsPerElementPadded;
-    default:
-      assert(0);
+  switch (bitWidthType)
+  {
+  case PimBitWidth::ACTUAL:
+  case PimBitWidth::SIM:
+  case PimBitWidth::HOST:
+    return pimUtils::getNumBitsOfDataType(m_dataType, bitWidthType);
+  case PimBitWidth::PADDED:
+    return m_bitsPerElementPadded;
+  default:
+    assert(0);
   }
   return 0;
 }
@@ -79,8 +79,10 @@ std::vector<pimRegion>
 pimObjInfo::getRegionsOfCore(PimCoreId coreId) const
 {
   std::vector<pimRegion> regions;
-  for (const auto& region : m_regions) {
-    if (region.getCoreId() == coreId) {
+  for (const auto &region : m_regions)
+  {
+    if (region.getCoreId() == coreId)
+    {
       regions.push_back(region);
     }
   }
@@ -88,19 +90,25 @@ pimObjInfo::getRegionsOfCore(PimCoreId coreId) const
 }
 
 //! @brief  Copy data from host memory to PIM object data holder, with ref support
-void
-pimObjInfo::copyFromHost(void* src, uint64_t idxBegin, uint64_t idxEnd)
+void pimObjInfo::copyFromHost(void *src, uint64_t idxBegin, uint64_t idxEnd)
 {
   // handle reference
-  if (m_refObjId != -1) {
-    pimObjInfo& refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
-    if (isDualContactRef()) {
+  if (m_refObjId != -1)
+  {
+    pimObjInfo &refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
+    if (isDualContactRef())
+    {
       uint64_t numBytes = refObj.m_data.getNumBytes(idxBegin, idxEnd);
       std::vector<uint8_t> buffer(numBytes);
       std::memcpy(buffer.data(), src, numBytes);
-      for (auto& byte : buffer) { byte = ~byte; }
+      for (auto &byte : buffer)
+      {
+        byte = ~byte;
+      }
       refObj.m_data.copyFromHost(buffer.data(), idxBegin, idxEnd);
-    } else {
+    }
+    else
+    {
       assert(0); // to be extended
     }
     return;
@@ -109,19 +117,25 @@ pimObjInfo::copyFromHost(void* src, uint64_t idxBegin, uint64_t idxEnd)
 }
 
 //! @brief  Copy data from PIM object data holder to host memory, with ref support
-void
-pimObjInfo::copyToHost(void* dest, uint64_t idxBegin, uint64_t idxEnd) const
+void pimObjInfo::copyToHost(void *dest, uint64_t idxBegin, uint64_t idxEnd) const
 {
   // handle reference
-  if (m_refObjId != -1) {
+  if (m_refObjId != -1)
+  {
     pimObjInfo &refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
-    if (isDualContactRef()) {
+    if (isDualContactRef())
+    {
       uint64_t numBytes = refObj.m_data.getNumBytes(idxBegin, idxEnd);
       std::vector<uint8_t> buffer(numBytes);
       refObj.m_data.copyToHost(buffer.data(), idxBegin, idxEnd);
-      for (auto& byte : buffer) { byte = ~byte; }
+      for (auto &byte : buffer)
+      {
+        byte = ~byte;
+      }
       std::memcpy(dest, buffer.data(), numBytes);
-    } else {
+    }
+    else
+    {
       assert(0); // to be extended
     }
     return;
@@ -130,19 +144,25 @@ pimObjInfo::copyToHost(void* dest, uint64_t idxBegin, uint64_t idxEnd) const
 }
 
 //! @brief  Copy data from a PIM object data holder to another, with ref support
-void
-pimObjInfo::copyToObj(pimObjInfo& destObj, uint64_t idxBegin, uint64_t idxEnd) const
+void pimObjInfo::copyToObj(pimObjInfo &destObj, uint64_t idxBegin, uint64_t idxEnd) const
 {
   // handle reference
-  if (m_refObjId != -1) {
+  if (m_refObjId != -1)
+  {
     pimObjInfo &refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
-    if (isDualContactRef()) {
+    if (isDualContactRef())
+    {
       uint64_t numBytes = m_data.getNumBytes(idxBegin, idxEnd);
       std::vector<uint8_t> buffer(numBytes);
       m_data.copyToHost(buffer.data(), idxBegin, idxEnd);
-      for (auto& byte : buffer) { byte = ~byte; }
+      for (auto &byte : buffer)
+      {
+        byte = ~byte;
+      }
       refObj.m_data.copyFromHost(buffer.data(), idxBegin, idxEnd);
-    } else {
+    }
+    else
+    {
       assert(0); // to be extended
     }
     return;
@@ -151,16 +171,19 @@ pimObjInfo::copyToObj(pimObjInfo& destObj, uint64_t idxBegin, uint64_t idxEnd) c
 }
 
 //! @brief  Set an element at index with bit presentation, with ref support
-void
-pimObjInfo::setElementBits(uint64_t index, uint64_t bits)
+void pimObjInfo::setElementBits(uint64_t index, uint64_t bits)
 {
   // handle reference
-  if (m_refObjId != -1) {
-    pimObjInfo& refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
-    if (isDualContactRef()) {
+  if (m_refObjId != -1)
+  {
+    pimObjInfo &refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
+    if (isDualContactRef())
+    {
       bits = ~bits;
       refObj.m_data.setElementBits(index, bits);
-    } else {
+    }
+    else
+    {
       assert(0); // to be extended
     }
     return;
@@ -173,14 +196,18 @@ uint64_t
 pimObjInfo::getElementBits(uint64_t index) const
 {
   // handle reference
-  if (m_refObjId != -1) {
-    pimObjInfo& refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
-    if (isDualContactRef()) {
+  if (m_refObjId != -1)
+  {
+    pimObjInfo &refObj = m_device->getResMgr()->getObjInfo(m_refObjId);
+    if (isDualContactRef())
+    {
       uint64_t bits = 0;
       refObj.m_data.getElementBits(index, bits);
       bits = ~bits;
       return bits;
-    } else {
+    }
+    else
+    {
       assert(0); // to be extended
     }
     return 0;
@@ -191,18 +218,19 @@ pimObjInfo::getElementBits(uint64_t index) const
 }
 
 //! @brief  Sync PIM object data from simulated memory
-void
-pimObjInfo::syncFromSimulatedMem()
+void pimObjInfo::syncFromSimulatedMem()
 {
   pimObjInfo &obj = (m_refObjId != -1 ? m_device->getResMgr()->getObjInfo(m_refObjId) : *this);
   unsigned numBits = getBitsPerElement(PimBitWidth::SIM);
-  for (size_t i = 0; i < m_regions.size(); ++i) {
-    pimRegion& region = m_regions[i];
+  for (size_t i = 0; i < m_regions.size(); ++i)
+  {
+    pimRegion &region = m_regions[i];
     PimCoreId coreId = region.getCoreId();
-    pimCore& core = m_device->getCore(coreId);
+    pimCore &core = m_device->getCore(coreId);
     uint64_t elemIdxBegin = region.getElemIdxBegin();
     uint64_t numElemInRegion = region.getNumElemInRegion();
-    for (uint64_t j = 0; j < numElemInRegion; ++j) {
+    for (uint64_t j = 0; j < numElemInRegion; ++j)
+    {
       auto [rowLoc, colLoc] = region.locateIthElemInRegion(j);
       uint64_t bits = isVLayout() ? core.getBitsV(rowLoc, colLoc, numBits)
                                   : core.getBitsH(rowLoc, colLoc, numBits);
@@ -212,39 +240,43 @@ pimObjInfo::syncFromSimulatedMem()
 }
 
 //! @brief  Sync PIM object data to simulated memory
-void
-pimObjInfo::syncToSimulatedMem() const
+void pimObjInfo::syncToSimulatedMem() const
 {
   const pimObjInfo &obj = (m_refObjId != -1 ? m_device->getResMgr()->getObjInfo(m_refObjId) : *this);
   unsigned numBits = getBitsPerElement(PimBitWidth::SIM);
-  for (size_t i = 0; i < m_regions.size(); ++i) {
-    const pimRegion& region = m_regions[i];
+  for (size_t i = 0; i < m_regions.size(); ++i)
+  {
+    const pimRegion &region = m_regions[i];
     PimCoreId coreId = region.getCoreId();
-    pimCore& core = m_device->getCore(coreId);
+    pimCore &core = m_device->getCore(coreId);
     uint64_t elemIdxBegin = region.getElemIdxBegin();
     uint64_t numElemInRegion = region.getNumElemInRegion();
-    for (uint64_t j = 0; j < numElemInRegion; ++j) {
+    for (uint64_t j = 0; j < numElemInRegion; ++j)
+    {
       uint64_t bits = 0;
       obj.m_data.getElementBits(elemIdxBegin + j, bits);
       auto [rowLoc, colLoc] = region.locateIthElemInRegion(j);
-      if (isVLayout()) {
+      if (isVLayout())
+      {
         core.setBitsV(rowLoc, colLoc, bits, numBits);
-      } else {
+      }
+      else
+      {
         core.setBitsH(rowLoc, colLoc, bits, numBits);
       }
     }
   }
 }
 
-
 //! @brief  pimResMgr ctor
-pimResMgr::pimResMgr(pimDevice* device)
-  : m_device(device),
-    m_availObjId(0)
+pimResMgr::pimResMgr(pimDevice *device)
+    : m_device(device),
+      m_availObjId(0)
 {
   unsigned numCores = m_device->getNumCores();
   unsigned numRowsPerCore = m_device->getNumRows();
-  for (unsigned i = 0; i < numCores; ++i) {
+  for (unsigned i = 0; i < numCores; ++i)
+  {
     m_coreUsage[i] = std::make_unique<coreUsage>(numRowsPerCore);
   }
   m_debugAlloc = (m_device->getConfig().getDebug() & pimSimConfig::DEBUG_ALLOC);
@@ -261,13 +293,15 @@ pimResMgr::~pimResMgr()
 PimObjId
 pimResMgr::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType dataType)
 {
-  if (m_debugAlloc) {
+  if (m_debugAlloc)
+  {
     printf("PIM-Debug: pimAlloc: Request: %s %lu elements of type %s\n",
            pimUtils::pimAllocEnumToStr(allocType).c_str(), numElements,
            pimUtils::pimDataTypeEnumToStr(dataType).c_str());
   }
 
-  if (numElements == 0) {
+  if (numElements == 0)
+  {
     printf("PIM-Error: pimAlloc: Invalid input parameter: 0 element\n");
     return -1;
   }
@@ -286,35 +320,43 @@ pimResMgr::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType da
   uint64_t numElemPerRegion = 0;
   uint64_t numElemPerRegionLast = 0;
   unsigned numColsPerElem = 0;
-  if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1) {
+  if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1)
+  {
     // allocate one region per core, with vertical layout
     numRowsToAlloc = bitsPerElement;
     numRegions = (numElements - 1) / numCols + 1;
     numColsToAllocLast = numElements % numCols;
-    if (numColsToAllocLast == 0) {
+    if (numColsToAllocLast == 0)
+    {
       numColsToAllocLast = numCols;
     }
     numElemPerRegion = numCols;
     numElemPerRegionLast = numColsToAllocLast;
     numColsPerElem = 1;
-  } else if (allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) {
+  }
+  else if (allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1)
+  {
     // allocate one region per core, with horizontal layout
     numRowsToAlloc = 1;
     numRegions = (numElements * bitsPerElement - 1) / numCols + 1;
     numColsToAllocLast = (numElements * bitsPerElement) % numCols;
-    if (numColsToAllocLast == 0) {
+    if (numColsToAllocLast == 0)
+    {
       numColsToAllocLast = numCols;
     }
     numElemPerRegion = numCols / bitsPerElement;
     numElemPerRegionLast = numColsToAllocLast / bitsPerElement;
     numColsPerElem = bitsPerElement;
-  } else {
+  }
+  else
+  {
     printf("PIM-Error: pimAlloc: Unsupported allocation type %s\n",
            pimUtils::pimAllocEnumToStr(allocType).c_str());
     return -1;
   }
 
-  if (m_debugAlloc) {
+  if (m_debugAlloc)
+  {
     printf("PIM-Debug: pimAlloc: Allocate %lu regions among %u cores\n",
            numRegions, numCores);
     printf("PIM-Debug: pimAlloc: Each region has %u rows x %u cols with %lu elements\n",
@@ -323,8 +365,10 @@ pimResMgr::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType da
            numRowsToAlloc, numColsToAllocLast, numElemPerRegionLast);
   }
 
-  if (numRegions > numCores) {
-    if (allocType == PIM_ALLOC_V1 || allocType == PIM_ALLOC_H1) {
+  if (numRegions > numCores)
+  {
+    if (allocType == PIM_ALLOC_V1 || allocType == PIM_ALLOC_H1)
+    {
       printf("PIM-Error: pimAlloc: Allocation type %s does not allow to allocate more regions (%lu) than number of cores (%u)\n",
              pimUtils::pimAllocEnumToStr(allocType).c_str(), numRegions, numCores);
       return -1;
@@ -333,17 +377,21 @@ pimResMgr::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType da
 
   // create new regions
   bool success = true;
-  for (unsigned i = 0; i < numCores; ++i) {
+  for (unsigned i = 0; i < numCores; ++i)
+  {
     m_coreUsage.at(i)->newAllocStart();
   }
-  if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1 || allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) {
+  if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1 || allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1)
+  {
     uint64_t elemIdx = 0;
-    for (uint64_t i = 0; i < numRegions; ++i) {
+    for (uint64_t i = 0; i < numRegions; ++i)
+    {
       PimCoreId coreId = sortedCoreId[i % numCores];
       unsigned numColsToAlloc = (i == numRegions - 1 ? numColsToAllocLast : numCols);
       unsigned numElemInRegion = (i == numRegions - 1 ? numElemPerRegionLast : numElemPerRegion);
       pimRegion newRegion = findAvailRegionOnCore(coreId, numRowsToAlloc, numColsToAlloc);
-      if (!newRegion.isValid()) {
+      if (!newRegion.isValid())
+      {
         printf("PIM-Error: pimAlloc: Failed: Out of PIM memory\n");
         success = false;
         break;
@@ -359,27 +407,34 @@ pimResMgr::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType da
       m_coreUsage.at(coreId)->addRange(alloc, newObj.getObjId());
     }
   }
-  for (unsigned i = 0; i < numCores; ++i) {
+  for (unsigned i = 0; i < numCores; ++i)
+  {
     m_coreUsage.at(i)->newAllocEnd(success); // rollback if failed
   }
 
-  if (!success) {
+  if (!success)
+  {
     return -1;
   }
 
   PimObjId objId = -1;
-  if (newObj.isValid()) {
+  if (newObj.isValid())
+  {
     objId = newObj.getObjId();
     newObj.finalize();
     // update new object to resource mgr
     m_objMap.insert(std::make_pair(newObj.getObjId(), newObj));
   }
 
-  if (m_debugAlloc) {
-    if (newObj.isValid()) {
+  if (m_debugAlloc)
+  {
+    if (newObj.isValid())
+    {
       printf("PIM-Debug: pimAlloc: Allocated PIM object %d successfully\n", objId);
       newObj.print();
-    } else {
+    }
+    else
+    {
       printf("PIM-Debug: pimAlloc: Failed\n");
     }
   }
@@ -390,19 +445,22 @@ pimResMgr::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType da
 PimObjId
 pimResMgr::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
 {
-  if (m_debugAlloc) {
+  if (m_debugAlloc)
+  {
     printf("PIM-Debug: pimAlloc: Request: Global Buffer %u elements of type %s\n",
            numElements, pimUtils::pimDataTypeEnumToStr(dataType).c_str());
   }
 
-  if (numElements == 0) {
+  if (numElements == 0)
+  {
     printf("PIM-Error: pimAlloc: Invalid input parameter: 0 element\n");
     return -1;
   }
 
   unsigned bitsPerElement = pimUtils::getNumBitsOfDataType(dataType, PimBitWidth::SIM);
 
-  if (numElements * bitsPerElement > m_device->getBufferSize() * 8) {
+  if (numElements * bitsPerElement > m_device->getBufferSize() * 8)
+  {
     printf("PIM-Error: pimAlloc: Invalid input parameter: %u elements exceeds buffer size %u bytes\n",
            numElements, m_device->getBufferSize());
     return -1;
@@ -419,14 +477,16 @@ pimResMgr::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
   uint64_t numElemPerRegionLast = 0;
   unsigned numColsPerElem = 0;
   numColsToAllocLast = (numElements * bitsPerElement) % numCols;
-  if (numColsToAllocLast == 0) {
+  if (numColsToAllocLast == 0)
+  {
     numColsToAllocLast = numCols;
   }
   numElemPerRegion = numCols / bitsPerElement;
   numElemPerRegionLast = numColsToAllocLast / bitsPerElement;
   numColsPerElem = bitsPerElement;
 
-  if (m_debugAlloc) {
+  if (m_debugAlloc)
+  {
     printf("PIM-Debug: pimAlloc: Allocate %lu regions\n", numRegions);
     printf("PIM-Debug: pimAlloc: Each region has %u rows x %u cols with %lu elements\n",
            numRowsToAlloc, numCols, numElemPerRegion);
@@ -440,7 +500,7 @@ pimResMgr::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
   unsigned numColsToAlloc = numCols;
   unsigned numElemInRegion = numElemPerRegionLast;
   pimRegion newRegion;
-  newRegion.setCoreId(0);  // Assign global buffer to core 0; this is fine for global buffers; for UPMEM, this will be different
+  newRegion.setCoreId(0); // Assign global buffer to core 0; this is fine for global buffers; for UPMEM, this will be different
   newRegion.setRowIdx(0);
   newRegion.setColIdx(0);
   newRegion.setNumAllocRows(numRowsToAlloc);
@@ -453,23 +513,29 @@ pimResMgr::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
   newRegion.setNumColsPerElem(numColsPerElem);
   newObj.addRegion(newRegion);
 
-  if (!success) {
+  if (!success)
+  {
     return -1;
   }
 
   PimObjId objId = -1;
-  if (newObj.isValid()) {
+  if (newObj.isValid())
+  {
     objId = newObj.getObjId();
     newObj.finalize();
     // update new object to resource mgr
     m_objMap.insert(std::make_pair(newObj.getObjId(), newObj));
   }
 
-  if (m_debugAlloc) {
-    if (newObj.isValid()) {
+  if (m_debugAlloc)
+  {
+    if (newObj.isValid())
+    {
       printf("PIM-Debug: pimAlloc: Allocated PIM object of type Buffer %d successfully\n", objId);
       newObj.print();
-    } else {
+    }
+    else
+    {
       printf("PIM-Debug: pimAlloc: Failed\n");
     }
   }
@@ -483,20 +549,23 @@ pimResMgr::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
 PimObjId
 pimResMgr::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
 {
-  if (m_debugAlloc) {
+  if (m_debugAlloc)
+  {
     printf("PIM-Debug: pimAllocAssociated: Request: Data type %s associated with PIM object ID %d\n",
            pimUtils::pimDataTypeEnumToStr(dataType).c_str(), assocId);
   }
 
   // check if assoc obj is valid
-  if (m_objMap.find(assocId) == m_objMap.end()) {
+  if (m_objMap.find(assocId) == m_objMap.end())
+  {
     printf("PIM-Error: pimAllocAssociated: Invalid associated PIM object ID %d\n", assocId);
     return -1;
   }
 
   // associated object must not be a buffer
-  const pimObjInfo& assocObj = m_objMap.at(assocId);
-  if (assocObj.isBuffer()) {
+  const pimObjInfo &assocObj = m_objMap.at(assocId);
+  if (assocObj.isBuffer())
+  {
     printf("PIM-Error: pimAllocAssociated: Associated PIM object ID %d is a buffer, which is not allowed.\n", assocId);
     return -1;
   }
@@ -509,30 +578,43 @@ pimResMgr::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
   uint64_t numElements = assocObj.getNumElements();
   unsigned bitsPerElement = pimUtils::getNumBitsOfDataType(dataType, PimBitWidth::SIM);
   unsigned bitsPerElementAssoc = assocObj.getBitsPerElement(PimBitWidth::PADDED);
-  if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1) {
-    if (m_debugAlloc) {
+  if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1)
+  {
+    if (m_debugAlloc)
+    {
       printf("PIM-Debug: pimAllocAssociated: New object of data type %s (%u bits) is associated with object (%u bits) in V layout\n",
              pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
     }
-  } else if (allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) {
-    if ((bitsPerElement > bitsPerElementAssoc) && (m_device->getSimTarget() != PIM_DEVICE_BANK_LEVEL && m_device->getSimTarget() != PIM_DEVICE_FULCRUM)) {
+  }
+  else if (allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1)
+  {
+    if ((bitsPerElement > bitsPerElementAssoc) && (m_device->getSimTarget() != PIM_DEVICE_BANK_LEVEL && m_device->getSimTarget() != PIM_DEVICE_FULCRUM))
+    {
       printf("PIM-Error: pimAllocAssociated: New object data type %s (%u bits) is wider than associated object (%u bits), which is not supported in H layout\n",
-            pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
+             pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
       return -1;
-    } else if (bitsPerElement < bitsPerElementAssoc) {
-      if (m_debugAlloc) {
+    }
+    else if (bitsPerElement < bitsPerElementAssoc)
+    {
+      if (m_debugAlloc)
+      {
         printf("PIM-Debug: pimAllocAssociated: New object of data type %s (%u bits) is padded to associated object (%u bits) in H layout\n",
-                pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
+               pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
       }
-      bitsPerElement = bitsPerElementAssoc;  // padding
-    } else {
+      bitsPerElement = bitsPerElementAssoc; // padding
+    }
+    else
+    {
       // same bit width, no padding needed
-      if (m_debugAlloc) {
+      if (m_debugAlloc)
+      {
         printf("PIM-Debug: pimAllocAssociated: New object of data type %s (%u bits) is associated with object (%u bits) in H layout\n",
-                pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
+               pimUtils::pimDataTypeEnumToStr(dataType).c_str(), bitsPerElement, bitsPerElementAssoc);
       }
     }
-  } else {
+  }
+  else
+  {
     printf("PIM-Error: pimAllocAssociated: Unsupported allocation type %s\n",
            pimUtils::pimAllocEnumToStr(allocType).c_str());
     return -1;
@@ -552,54 +634,63 @@ pimResMgr::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
   // The reason other horizontal bit-parallel (AiM, Aquabolt) PIM is not included in this condition is that
   // they support only 16-bit floats/ints.
   // If more bit-parallel PIMs are added, this condition should be extended.
-  if ((allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) && (bitsPerElement > bitsPerElementAssoc) && (m_device->getSimTarget() == PIM_DEVICE_BANK_LEVEL || m_device->getSimTarget() == PIM_DEVICE_FULCRUM)) {
+  if ((allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) && (bitsPerElement > bitsPerElementAssoc) && (m_device->getSimTarget() == PIM_DEVICE_BANK_LEVEL || m_device->getSimTarget() == PIM_DEVICE_FULCRUM))
+  {
     // allocate one region per core, with horizontal layout
     numRegions = (numElements * bitsPerElement - 1) / numCols + 1;
 
     // This is a controversial design decision. I am not fully sold on this
-    // TODO: discuss with professor before implementing the `non-controversial` design 
-    if (numRegions > assocObj.getRegions().size()) {
+    // TODO: discuss with professor before implementing the `non-controversial` design
+    if (numRegions > assocObj.getRegions().size())
+    {
       printf("PIM-Error: pimAllocAssociated: Allocation type %s does not allow to allocate more regions (%lu) than associated object (%lu)\n",
              pimUtils::pimAllocEnumToStr(allocType).c_str(), numRegions, assocObj.getRegions().size());
       return -1;
     }
 
-    if (numRegions > numCores) {
+    if (numRegions > numCores)
+    {
       printf("PIM-Error: pimAllocAssociated: Allocation type %s does not allow to allocate more regions (%lu) than number of cores (%u)\n",
              pimUtils::pimAllocEnumToStr(allocType).c_str(), numRegions, numCores);
       return -1;
     }
 
     numColsToAllocLast = (numElements * bitsPerElement) % numCols;
-    if (numColsToAllocLast == 0) {
+    if (numColsToAllocLast == 0)
+    {
       numColsToAllocLast = numCols;
     }
     numElemPerRegion = numCols / bitsPerElement;
     numElemPerRegionLast = numColsToAllocLast / bitsPerElement;
     numColsPerElem = bitsPerElement;
-  }    
+  }
 
   bool success = true;
-  for (unsigned i = 0; i < numCores; ++i) {
+  for (unsigned i = 0; i < numCores; ++i)
+  {
     m_coreUsage.at(i)->newAllocStart();
   }
 
   unsigned regionIdx = 0;
   uint64_t elemIdx = 0;
-  for (const pimRegion& region : assocObj.getRegions()) {
-    if ((bitsPerElement > bitsPerElementAssoc) && (allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) && (m_device->getSimTarget() == PIM_DEVICE_BANK_LEVEL || m_device->getSimTarget() == PIM_DEVICE_FULCRUM)) {
+  for (const pimRegion &region : assocObj.getRegions())
+  {
+    if ((bitsPerElement > bitsPerElementAssoc) && (allocType == PIM_ALLOC_H || allocType == PIM_ALLOC_H1) && (m_device->getSimTarget() == PIM_DEVICE_BANK_LEVEL || m_device->getSimTarget() == PIM_DEVICE_FULCRUM))
+    {
       PimCoreId coreId = region.getCoreId();
       unsigned numAllocRows = region.getNumAllocRows() * bitsPerElement / bitsPerElementAssoc;
       unsigned numAllocCols = (regionIdx == numRegions - 1 ? numColsToAllocLast : numCols);
       pimRegion newRegion = findAvailRegionOnCore(coreId, numAllocRows, numAllocCols);
-      if (!newRegion.isValid()) {
+      if (!newRegion.isValid())
+      {
         printf("PIM-Error: pimAlloc: Failed: Out of PIM memory\n");
         success = false;
         break;
       }
       newRegion.setElemIdxBegin(elemIdx);
       elemIdx += (regionIdx == numRegions - 1 ? numElemPerRegionLast : numElemPerRegion);
-      if (elemIdx != region.getElemIdxEnd()) {
+      if (elemIdx != region.getElemIdxEnd())
+      {
         printf("PIM-Error: pimAllocAssociated: Mismatch in element index range: %lu vs %lu\n",
                elemIdx, region.getElemIdxEnd());
         success = false;
@@ -612,15 +703,19 @@ pimResMgr::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
       // add to core usage map
       auto alloc = std::make_pair(newRegion.getRowIdx(), numAllocRows);
       m_coreUsage.at(coreId)->addRange(alloc, newObj.getObjId());
-    } else {
+    }
+    else
+    {
       PimCoreId coreId = region.getCoreId();
       unsigned numAllocRows = region.getNumAllocRows();
       unsigned numAllocCols = region.getNumAllocCols();
-      if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1) {
+      if (allocType == PIM_ALLOC_V || allocType == PIM_ALLOC_V1)
+      {
         numAllocRows = bitsPerElement;
       }
       pimRegion newRegion = findAvailRegionOnCore(coreId, numAllocRows, numAllocCols);
-      if (!newRegion.isValid()) {
+      if (!newRegion.isValid())
+      {
         printf("PIM-Error: pimAllocAssociated: Failed: Out of PIM memory\n");
         success = false;
         break;
@@ -636,16 +731,19 @@ pimResMgr::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
     }
     regionIdx++;
   }
-  for (unsigned i = 0; i < numCores; ++i) {
+  for (unsigned i = 0; i < numCores; ++i)
+  {
     m_coreUsage.at(i)->newAllocEnd(success); // rollback if failed
   }
 
-  if (!success) {
+  if (!success)
+  {
     return -1;
   }
 
   PimObjId objId = -1;
-  if (newObj.isValid()) {
+  if (newObj.isValid())
+  {
     objId = newObj.getObjId();
     newObj.finalize();
     newObj.setAssocObjId(assocObj.getAssocObjId());
@@ -653,43 +751,179 @@ pimResMgr::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
     m_objMap.insert(std::make_pair(newObj.getObjId(), newObj));
   }
 
-  if (m_debugAlloc) {
-    if (newObj.isValid()) {
+  if (m_debugAlloc)
+  {
+    if (newObj.isValid())
+    {
       printf("PIM-Debug: pimAllocAssociated: Allocated PIM object %d successfully\n", objId);
       newObj.print();
-    } else {
+    }
+    else
+    {
       printf("PIM-Debug: pimAllocAssociated: Failed\n");
     }
   }
   return objId;
 }
 
-//! @brief  Free a PIM object
-bool
-pimResMgr::pimFree(PimObjId objId)
+//! @brief  Allocate a PIM object whose every element corresponds to a group of groupSize consecutive
+//!         elements of an existing object (e.g. the accumulator of a PE that reduces 16 lanes).
+//!         Element g of the new object lives on the same core (and same region) as elements
+//!         [g*groupSize, (g+1)*groupSize) of the associated object.
+//!         Requirements: H layout, associated number of elements and every region's number of
+//!         elements divisible by groupSize (groups never straddle a region).
+//!         The new object is NOT "associated" in the isAssociated() sense (different length);
+//!         it is used by dedicated group-reduction commands only.
+PimObjId
+pimResMgr::pimAllocAssociatedGrouped(PimObjId assocId, PimDataType dataType, unsigned groupSize)
 {
-  if (m_objMap.find(objId) == m_objMap.end()) {
+  if (m_debugAlloc)
+  {
+    printf("PIM-Debug: pimAllocAssociatedGrouped: Request: Data type %s, group size %u, associated with PIM object ID %d\n",
+           pimUtils::pimDataTypeEnumToStr(dataType).c_str(), groupSize, assocId);
+  }
+  if (groupSize == 0)
+  {
+    printf("PIM-Error: pimAllocAssociatedGrouped: Group size must be at least 1\n");
+    return -1;
+  }
+  auto it = m_objMap.find(assocId);
+  if (it == m_objMap.end())
+  {
+    printf("PIM-Error: pimAllocAssociatedGrouped: Invalid associated PIM object ID %d\n", assocId);
+    return -1;
+  }
+  const pimObjInfo &assocObj = it->second;
+  if (assocObj.isBuffer())
+  {
+    printf("PIM-Error: pimAllocAssociatedGrouped: Associated PIM object ID %d is a buffer, which is not allowed.\n", assocId);
+    return -1;
+  }
+  if (!assocObj.isHLayout())
+  {
+    printf("PIM-Error: pimAllocAssociatedGrouped: Only H layout is supported\n");
+    return -1;
+  }
+  uint64_t assocNumElements = assocObj.getNumElements();
+  if (assocNumElements % groupSize != 0)
+  {
+    printf("PIM-Error: pimAllocAssociatedGrouped: Number of elements %lu of object %d is not a multiple of group size %u\n",
+           assocNumElements, assocId, groupSize);
+    return -1;
+  }
+  unsigned numCols = m_device->getNumCols();
+  unsigned bitsPerElement = pimUtils::getNumBitsOfDataType(dataType, PimBitWidth::SIM);
+  for (const pimRegion &region : assocObj.getRegions())
+  {
+    uint64_t n = region.getNumElemInRegion();
+    if (n % groupSize != 0)
+    {
+      printf("PIM-Error: pimAllocAssociatedGrouped: A region holds %lu elements, not a multiple of group size %u (a group would straddle regions)\n",
+             n, groupSize);
+      return -1;
+    }
+    if ((n / groupSize) * bitsPerElement > numCols)
+    {
+      printf("PIM-Error: pimAllocAssociatedGrouped: Grouped region does not fit in %u columns\n", numCols);
+      return -1;
+    }
+  }
+
+  const uint64_t newNumElements = assocNumElements / groupSize;
+  pimObjInfo newObj(m_availObjId, dataType, assocObj.getAllocType(), newNumElements, bitsPerElement, m_device);
+  m_availObjId++;
+
+  unsigned numCores = m_device->getNumCores();
+  for (unsigned i = 0; i < numCores; ++i)
+  {
+    m_coreUsage.at(i)->newAllocStart();
+  }
+
+  bool success = true;
+  for (const pimRegion &region : assocObj.getRegions())
+  {
+    PimCoreId coreId = region.getCoreId();
+    uint64_t newElemsInRegion = region.getNumElemInRegion() / groupSize;
+    unsigned numAllocRows = 1;
+    unsigned numAllocCols = (unsigned)(newElemsInRegion * bitsPerElement);
+    pimRegion newRegion = findAvailRegionOnCore(coreId, numAllocRows, numAllocCols);
+    if (!newRegion.isValid())
+    {
+      printf("PIM-Error: pimAllocAssociatedGrouped: Failed: Out of PIM memory\n");
+      success = false;
+      break;
+    }
+    newRegion.setElemIdxBegin(region.getElemIdxBegin() / groupSize);
+    newRegion.setElemIdxEnd(region.getElemIdxEnd() / groupSize); // exclusive
+    newRegion.setNumColsPerElem(bitsPerElement);
+    newObj.addRegion(newRegion);
+    auto alloc = std::make_pair(newRegion.getRowIdx(), numAllocRows);
+    m_coreUsage.at(coreId)->addRange(alloc, newObj.getObjId());
+  }
+  for (unsigned i = 0; i < numCores; ++i)
+  {
+    m_coreUsage.at(i)->newAllocEnd(success); // rollback if failed
+  }
+  if (!success)
+  {
+    return -1;
+  }
+
+  PimObjId objId = -1;
+  if (newObj.isValid())
+  {
+    objId = newObj.getObjId();
+    newObj.finalize();
+    // assocObjId stays the object's own id on purpose: it is not element-wise associated
+    newObj.setGroupInfo(assocObj.getAssocObjId(), groupSize);
+    m_objMap.insert(std::make_pair(newObj.getObjId(), newObj));
+  }
+  if (m_debugAlloc)
+  {
+    if (newObj.isValid())
+    {
+      printf("PIM-Debug: pimAllocAssociatedGrouped: Allocated PIM object %d successfully\n", objId);
+      newObj.print();
+    }
+    else
+    {
+      printf("PIM-Debug: pimAllocAssociatedGrouped: Failed\n");
+    }
+  }
+  return objId;
+}
+
+//! @brief  Free a PIM object
+bool pimResMgr::pimFree(PimObjId objId)
+{
+  if (m_objMap.find(objId) == m_objMap.end())
+  {
     printf("PIM-Error: pimFree: Invalid PIM object ID %d\n", objId);
     return false;
   }
   unsigned numCores = m_device->getNumCores();
-  const pimObjInfo& obj = m_objMap.at(objId);
+  const pimObjInfo &obj = m_objMap.at(objId);
 
-  if (!obj.isDualContactRef()) {
-    for (unsigned i = 0; i < numCores; ++i) {
+  if (!obj.isDualContactRef())
+  {
+    for (unsigned i = 0; i < numCores; ++i)
+    {
       m_coreUsage.at(i)->deleteObj(objId);
     }
   }
   m_objMap.erase(objId);
 
   // free all reference as well
-  if (m_refMap.find(objId) != m_refMap.end()) {
-    for (auto refId : m_refMap.at(objId)) {
+  if (m_refMap.find(objId) != m_refMap.end())
+  {
+    for (auto refId : m_refMap.at(objId))
+    {
       m_objMap.erase(refId);
     }
   }
 
-  if (m_debugAlloc) {
+  if (m_debugAlloc)
+  {
     printf("PIM-Debug: pimFree: Deleted object %d\n", objId);
   }
   return true;
@@ -708,13 +942,15 @@ PimObjId
 pimResMgr::pimCreateDualContactRef(PimObjId refId)
 {
   // check if ref obj is valid
-  if (m_objMap.find(refId) == m_objMap.end()) {
+  if (m_objMap.find(refId) == m_objMap.end())
+  {
     std::printf("PIM-Error: Invalid ref object ID %d for PIM dual contact ref\n", refId);
     return -1;
   }
 
-  const pimObjInfo& refObj = m_objMap.at(refId);
-  if (refObj.isDualContactRef()) {
+  const pimObjInfo &refObj = m_objMap.at(refId);
+  if (refObj.isDualContactRef())
+  {
     std::printf("PIM-Error: Cannot create dual contact ref of dual contact ref %d\n", refId);
     return -1;
   }
@@ -745,7 +981,8 @@ pimResMgr::findAvailRegionOnCore(PimCoreId coreId, unsigned numAllocRows, unsign
 
   // try to find an available slot
   unsigned prevAvail = m_coreUsage.at(coreId)->findAvailRange(numAllocRows);
-  if (m_device->getNumRows() - prevAvail >= numAllocRows) {
+  if (m_device->getNumRows() - prevAvail >= numAllocRows)
+  {
     region.setRowIdx(prevAvail);
     region.setIsValid(true);
     return region;
@@ -759,13 +996,15 @@ std::vector<PimCoreId>
 pimResMgr::getCoreIdsSortedByLeastUsage() const
 {
   std::vector<std::pair<unsigned, unsigned>> usages;
-  for (unsigned coreId = 0; coreId < m_device->getNumCores(); ++coreId) {
+  for (unsigned coreId = 0; coreId < m_device->getNumCores(); ++coreId)
+  {
     unsigned usage = m_coreUsage.at(coreId)->getTotRowsInUse();
     usages.emplace_back(usage, coreId);
   }
   std::sort(usages.begin(), usages.end());
   std::vector<PimCoreId> result;
-  for (const auto& it : usages) {
+  for (const auto &it : usages)
+  {
     result.push_back(it.second);
   }
   return result;
@@ -776,10 +1015,12 @@ unsigned
 pimResMgr::coreUsage::findAvailRange(unsigned numRowsToAlloc)
 {
   unsigned prevAvail = 0;
-  for (const auto& it : m_rangesInUse) {
+  for (const auto &it : m_rangesInUse)
+  {
     unsigned rowIdx = it.first.first;
     unsigned numRows = it.first.second;
-    if (rowIdx - prevAvail >= numRowsToAlloc) {
+    if (rowIdx - prevAvail >= numRowsToAlloc)
+    {
       return prevAvail;
     }
     prevAvail = rowIdx + numRows;
@@ -790,16 +1031,17 @@ pimResMgr::coreUsage::findAvailRange(unsigned numRowsToAlloc)
 //! @brief  Add a new range to core usage.
 //! The new range will be aggregated with previous adjacent range if they are from same object
 //! Returned range is after aggregation
-void
-pimResMgr::coreUsage::addRange(std::pair<unsigned, unsigned> range, PimObjId objId)
+void pimResMgr::coreUsage::addRange(std::pair<unsigned, unsigned> range, PimObjId objId)
 {
   // aggregate with the prev range
-  if (!m_rangesInUse.empty()) {
+  if (!m_rangesInUse.empty())
+  {
     auto it = std::prev(m_rangesInUse.end());
     unsigned lastIdx = it->first.first;
     unsigned lastSize = it->first.second;
     PimObjId lastObjId = it->second;
-    if (lastIdx + lastSize == range.first && lastObjId == objId) {
+    if (lastIdx + lastSize == range.first && lastObjId == objId)
+    {
       m_newAlloc.erase(it->first);
       m_rangesInUse.erase(it);
       range = std::make_pair(lastIdx, lastSize + range.second);
@@ -811,32 +1053,35 @@ pimResMgr::coreUsage::addRange(std::pair<unsigned, unsigned> range, PimObjId obj
 }
 
 //! @brief  Delete an object from core usage
-void
-pimResMgr::coreUsage::deleteObj(PimObjId objId)
+void pimResMgr::coreUsage::deleteObj(PimObjId objId)
 {
-  for (auto it = m_rangesInUse.begin(); it != m_rangesInUse.end();) {
-    if (it->second == objId) {
+  for (auto it = m_rangesInUse.begin(); it != m_rangesInUse.end();)
+  {
+    if (it->second == objId)
+    {
       m_totRowsInUse -= it->first.second;
       it = m_rangesInUse.erase(it);
-    } else {
+    }
+    else
+    {
       ++it;
     }
   }
 }
 
 //! @brief  Start a new allocation. This is preparing for rollback
-void
-pimResMgr::coreUsage::newAllocStart()
+void pimResMgr::coreUsage::newAllocStart()
 {
   m_newAlloc.clear();
 }
 
 //! @brief  End a new allocation. If failed, rollback all regions
-void
-pimResMgr::coreUsage::newAllocEnd(bool success)
+void pimResMgr::coreUsage::newAllocEnd(bool success)
 {
-  if (!success) {
-    for (const auto &range : m_newAlloc) {
+  if (!success)
+  {
+    for (const auto &range : m_newAlloc)
+    {
       m_rangesInUse.erase(range);
       m_totRowsInUse -= range.second;
     }
@@ -845,25 +1090,21 @@ pimResMgr::coreUsage::newAllocEnd(bool success)
 }
 
 //! @brief  If a PIM object uses vertical data layout
-bool
-pimResMgr::isVLayoutObj(PimObjId objId) const
+bool pimResMgr::isVLayoutObj(PimObjId objId) const
 {
-  const pimObjInfo& obj = getObjInfo(objId);
+  const pimObjInfo &obj = getObjInfo(objId);
   return obj.isVLayout();
 }
 
 //! @brief  If a PIM object uses horizontal data layout
-bool
-pimResMgr::isHLayoutObj(PimObjId objId) const
+bool pimResMgr::isHLayoutObj(PimObjId objId) const
 {
-  const pimObjInfo& obj = getObjInfo(objId);
+  const pimObjInfo &obj = getObjInfo(objId);
   return obj.isHLayout();
 }
 
 //! @brief  If a PIM object uses hybrid data layout
-bool
-pimResMgr::isHybridLayoutObj(PimObjId objId) const
+bool pimResMgr::isHybridLayoutObj(PimObjId objId) const
 {
   return false;
 }
-

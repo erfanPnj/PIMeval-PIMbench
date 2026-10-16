@@ -252,6 +252,18 @@ pimSim::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
   return m_device->pimAllocAssociated(assocId, dataType);
 }
 
+//! @brief  Allocate a PIM object with one element per group of groupSize elements of an existing object
+PimObjId
+pimSim::pimAllocAssociatedGrouped(PimObjId assocId, PimDataType dataType, unsigned groupSize)
+{
+  pimPerfMon perfMon("pimAllocAssociatedGrouped");
+  if (!isValidDevice())
+  {
+    return -1;
+  }
+  return m_device->pimAllocAssociatedGrouped(assocId, dataType, groupSize);
+}
+
 PimObjId
 pimSim::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
 {
@@ -1393,7 +1405,7 @@ bool pimSim::pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest)
 {
   if (!isValidDevice())
     return false;
-  std::unique_ptr<pimCmd> cmd = std::make_unique<pimCmdFunc2>(PimCmdEnum::ONCNN_MAC, src1, src2, dest);
+  std::unique_ptr<pimCmd> cmd = std::make_unique<pimCmdONCNNMac>(PimCmdEnum::ONCNN_MAC, src1, src2, dest);
   return m_device->executeCmd(std::move(cmd));
 }
 

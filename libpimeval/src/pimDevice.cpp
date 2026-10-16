@@ -14,10 +14,9 @@
 #include <cassert>
 #include <string>
 
-
 //! @brief  pimDevice ctor
-pimDevice::pimDevice(const pimSimConfig& config)
-  : m_config(config)
+pimDevice::pimDevice(const pimSimConfig &config)
+    : m_config(config)
 {
   init();
 }
@@ -28,10 +27,10 @@ pimDevice::~pimDevice()
 }
 
 //! @brief  Adjust config for modeling different simulation target with same inputs
-bool
-pimDevice::adjustConfigForSimTarget(unsigned& numRanks, unsigned& numBankPerRank, unsigned& numSubarrayPerBank, unsigned& numRows, unsigned& numCols)
+bool pimDevice::adjustConfigForSimTarget(unsigned &numRanks, unsigned &numBankPerRank, unsigned &numSubarrayPerBank, unsigned &numRows, unsigned &numCols)
 {
-  switch (getSimTarget()) {
+  switch (getSimTarget())
+  {
   case PIM_DEVICE_BITSIMD_V:
   case PIM_DEVICE_BITSIMD_V_NAND:
   case PIM_DEVICE_BITSIMD_V_MAJ:
@@ -42,7 +41,8 @@ pimDevice::adjustConfigForSimTarget(unsigned& numRanks, unsigned& numBankPerRank
   case PIM_DEVICE_BITSIMD_H:
   case PIM_DEVICE_FULCRUM:
     std::printf("PIM-Info: Aggregate every two subarrays as a single core\n");
-    if (numSubarrayPerBank % 2 != 0) {
+    if (numSubarrayPerBank % 2 != 0)
+    {
       std::printf("PIM-Error: Please config even number of subarrays in each bank\n");
       return false;
     }
@@ -57,13 +57,14 @@ pimDevice::adjustConfigForSimTarget(unsigned& numRanks, unsigned& numBankPerRank
     break;
   case PIM_DEVICE_AQUABOLT:
     std::printf("PIM-Info: Aggregate all subarrays of two consecutive banks as a single core\n");
-    if (numBankPerRank % 2 != 0) {
+    if (numBankPerRank % 2 != 0)
+    {
       std::printf("PIM-Error: Number of banks must be an even number\n");
       return false;
     }
-    numRows *= numSubarrayPerBank*2;
+    numRows *= numSubarrayPerBank * 2;
     numSubarrayPerBank = 1;
-    numBankPerRank /= 2; 
+    numBankPerRank /= 2;
     break;
   default:
     assert(0);
@@ -72,29 +73,25 @@ pimDevice::adjustConfigForSimTarget(unsigned& numRanks, unsigned& numBankPerRank
 }
 
 //! @brief  If a PIM device uses vertical data layout
-bool
-pimDevice::isVLayoutDevice() const
+bool pimDevice::isVLayoutDevice() const
 {
   return pimUtils::getDeviceDataLayout(getSimTarget()) == PimDataLayout::V;
 }
 
 //! @brief  If a PIM device uses horizontal data layout
-bool
-pimDevice::isHLayoutDevice() const
+bool pimDevice::isHLayoutDevice() const
 {
   return pimUtils::getDeviceDataLayout(getSimTarget()) == PimDataLayout::H;
 }
 
 //! @brief  If a PIM device uses hybrid data layout
-bool
-pimDevice::isHybridLayoutDevice() const
+bool pimDevice::isHybridLayoutDevice() const
 {
   return pimUtils::getDeviceDataLayout(getSimTarget()) == PimDataLayout::HYBRID;
 }
 
 //! @brief  Init PIM device
-bool
-pimDevice::init()
+bool pimDevice::init()
 {
   assert(!m_isInit);
 
@@ -105,49 +102,56 @@ pimDevice::init()
   unsigned numRows = getNumRowPerSubarray();
   unsigned numCols = getNumColPerSubarray();
   unsigned bufferSize = getOnChipBufferSize();
-  if (adjustConfigForSimTarget(numRanks, numBankPerRank, numSubarrayPerBank, numRows, numCols)) {
+  if (adjustConfigForSimTarget(numRanks, numBankPerRank, numSubarrayPerBank, numRows, numCols))
+  {
     m_numCores = numRanks * numBankPerRank * numSubarrayPerBank;
     m_numRows = numRows;
     m_numCols = numCols;
     m_bufferSize = bufferSize;
-  } else {
+  }
+  else
+  {
     return false;
   }
 
 #ifdef DRAMSIM3_INTEG
   std::string configFile = m_config.getSimConfigFile();
-  //TODO: DRAMSim3 requires an output directory but for our purpose we do not need it so sending empty string
+  // TODO: DRAMSim3 requires an output directory but for our purpose we do not need it so sending empty string
   m_deviceMemory = new dramsim3::PIMCPU(configFile, "");
   m_deviceMemoryConfig = m_deviceMemory->getMemorySystem()->getConfig();
   u_int64_t rowsPerBank = m_deviceMemoryConfig->rows, columnPerRow = m_deviceMemoryConfig->columns * m_deviceMemoryConfig->device_width;
 
   // todo: adjust for sim target
   m_numCores = 16;
-  m_numRows = rowsPerBank/m_numCores;
+  m_numRows = rowsPerBank / m_numCores;
   m_numCols = columnPerRow;
 #endif
 
   m_isValid = (m_numCores > 0 && m_numRows > 0 && m_numCols > 0);
-  if (m_numCols % 8 != 0) {
+  if (m_numCols % 8 != 0)
+  {
     std::printf("PIM-Error: Number of columns %u is not a multiple of 8\n", m_numCols);
     return false;
   }
-  if (!m_isValid) {
+  if (!m_isValid)
+  {
     std::printf("PIM-Error: Incorrect device parameters: %u cores, %u rows, %u columns\n", m_numCores, m_numRows, m_numCols);
     return false;
   }
 
   m_resMgr = std::make_unique<pimResMgr>(this);
-  const pimParamsDram& paramsDram = pimSim::get()->getParamsDram(); // created before pimDevice ctor
+  const pimParamsDram &paramsDram = pimSim::get()->getParamsDram(); // created before pimDevice ctor
   pimPerfEnergyModelParams params(getSimTarget(), getNumRanks(), paramsDram);
   m_perfEnergyModel = pimPerfEnergyFactory::createPerfEnergyModel(params);
 
   // Disable simulated memory creation for functional simulation
-  if (getDeviceType() != PIM_FUNCTIONAL) {
+  if (getDeviceType() != PIM_FUNCTIONAL)
+  {
     m_cores.resize(m_numCores, pimCore(m_numRows, m_numCols));
   }
 
-  if (getSimTarget() != PIM_DEVICE_AIM && m_bufferSize > 0) {
+  if (getSimTarget() != PIM_DEVICE_AIM && m_bufferSize > 0)
+  {
     std::printf("PIM-Error: Device Does not support On-Chip Buffer\n");
     m_isInit = false;
     m_isValid = false;
@@ -164,23 +168,30 @@ pimDevice::init()
 PimObjId
 pimDevice::pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType dataType)
 {
-  if (allocType == PIM_ALLOC_AUTO) {
-    if (isVLayoutDevice()) {
+  if (allocType == PIM_ALLOC_AUTO)
+  {
+    if (isVLayoutDevice())
+    {
       allocType = PIM_ALLOC_V;
-    } else if (isHLayoutDevice()) {
+    }
+    else if (isHLayoutDevice())
+    {
       allocType = PIM_ALLOC_H;
-    } else {
+    }
+    else
+    {
       assert(0);
     }
   }
   return m_resMgr->pimAlloc(allocType, numElements, dataType);
 }
 
- //! @brief  Allocate a PIM buffer
+//! @brief  Allocate a PIM buffer
 PimObjId
 pimDevice::pimAllocBuffer(uint32_t numElements, PimDataType dataType)
 {
-  if (getSimTarget() != PIM_DEVICE_AIM) {
+  if (getSimTarget() != PIM_DEVICE_AIM)
+  {
     std::printf("PIM-Error: Device does not support On-Chip Buffer\n");
     return -1;
   }
@@ -194,9 +205,14 @@ pimDevice::pimAllocAssociated(PimObjId assocId, PimDataType dataType)
   return m_resMgr->pimAllocAssociated(assocId, dataType);
 }
 
+PimObjId
+pimDevice::pimAllocAssociatedGrouped(PimObjId assocId, PimDataType dataType, unsigned groupSize)
+{
+  return m_resMgr->pimAllocAssociatedGrouped(assocId, dataType, groupSize);
+}
+
 //! @brief  Free a PIM object
-bool
-pimDevice::pimFree(PimObjId obj)
+bool pimDevice::pimFree(PimObjId obj)
 {
   return m_resMgr->pimFree(obj);
 }
@@ -216,57 +232,50 @@ pimDevice::pimCreateDualContactRef(PimObjId refId)
 }
 
 //! @brief  Copy data from host to PIM within a range
-bool
-pimDevice::pimCopyMainToDevice(void* src, PimObjId dest, uint64_t idxBegin, uint64_t idxEnd)
+bool pimDevice::pimCopyMainToDevice(void *src, PimObjId dest, uint64_t idxBegin, uint64_t idxEnd)
 {
   PimCopyEnum copyType = m_resMgr->isHLayoutObj(dest) ? PIM_COPY_H : PIM_COPY_V;
   return pimCopyMainToDeviceWithType(copyType, src, dest, idxBegin, idxEnd);
 }
 
 //! @brief  Copy data from PIM to host within a range
-bool
-pimDevice::pimCopyDeviceToMain(PimObjId src, void* dest, uint64_t idxBegin, uint64_t idxEnd)
+bool pimDevice::pimCopyDeviceToMain(PimObjId src, void *dest, uint64_t idxBegin, uint64_t idxEnd)
 {
   PimCopyEnum copyType = m_resMgr->isHLayoutObj(src) ? PIM_COPY_H : PIM_COPY_V;
   return pimCopyDeviceToMainWithType(copyType, src, dest, idxBegin, idxEnd);
 }
 
 //! @brief  Copy data from host to PIM within a range
-bool
-pimDevice::pimCopyMainToDeviceWithType(PimCopyEnum copyType, void* src, PimObjId dest, uint64_t idxBegin, uint64_t idxEnd)
+bool pimDevice::pimCopyMainToDeviceWithType(PimCopyEnum copyType, void *src, PimObjId dest, uint64_t idxBegin, uint64_t idxEnd)
 {
   std::unique_ptr<pimCmd> cmd =
-    std::make_unique<pimCmdCopy>(PimCmdEnum::COPY_H2D, copyType, src, dest, idxBegin, idxEnd);
+      std::make_unique<pimCmdCopy>(PimCmdEnum::COPY_H2D, copyType, src, dest, idxBegin, idxEnd);
   return executeCmd(std::move(cmd));
 }
 
 //! @brief  Copy data from PIM to host within a range
-bool
-pimDevice::pimCopyDeviceToMainWithType(PimCopyEnum copyType, PimObjId src, void* dest, uint64_t idxBegin, uint64_t idxEnd)
+bool pimDevice::pimCopyDeviceToMainWithType(PimCopyEnum copyType, PimObjId src, void *dest, uint64_t idxBegin, uint64_t idxEnd)
 {
   std::unique_ptr<pimCmd> cmd =
-    std::make_unique<pimCmdCopy>(PimCmdEnum::COPY_D2H, copyType, src, dest, idxBegin, idxEnd);
+      std::make_unique<pimCmdCopy>(PimCmdEnum::COPY_D2H, copyType, src, dest, idxBegin, idxEnd);
   return executeCmd(std::move(cmd));
 }
 
 //! @brief  Copy data from PIM to PIM within a range
-bool
-pimDevice::pimCopyDeviceToDevice(PimObjId src, PimObjId dest, uint64_t idxBegin, uint64_t idxEnd)
+bool pimDevice::pimCopyDeviceToDevice(PimObjId src, PimObjId dest, uint64_t idxBegin, uint64_t idxEnd)
 {
-  const pimObjInfo& obj = m_resMgr->getObjInfo(src);
+  const pimObjInfo &obj = m_resMgr->getObjInfo(src);
   PimCopyEnum copyType = obj.isVLayout() ? PIM_COPY_V : PIM_COPY_H;
   std::unique_ptr<pimCmd> cmd =
-    std::make_unique<pimCmdCopy>(PimCmdEnum::COPY_D2D, copyType, src, dest, idxBegin, idxEnd);
+      std::make_unique<pimCmdCopy>(PimCmdEnum::COPY_D2D, copyType, src, dest, idxBegin, idxEnd);
   return executeCmd(std::move(cmd));
 }
 
 //! @brief  Execute a PIM command
-bool
-pimDevice::executeCmd(std::unique_ptr<pimCmd> cmd)
+bool pimDevice::executeCmd(std::unique_ptr<pimCmd> cmd)
 {
   cmd->setDevice(this);
   bool ok = cmd->execute();
 
   return ok;
 }
-

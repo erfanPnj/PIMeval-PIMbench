@@ -473,9 +473,9 @@ private:
     case PimCmdEnum::MUL:
       result = operand1 * operand2;
       break;
-    case PimCmdEnum::ONCNN_MAC:
-      result = result + operand1 * operand2;
-      break;
+    // case PimCmdEnum::ONCNN_MAC:
+    //   result = result + operand1 * operand2;
+    //   break;
     case PimCmdEnum::DIV:
       if (operand2 == 0)
       {
@@ -538,9 +538,9 @@ private:
     case PimCmdEnum::MUL:
       result = operand1 * operand2;
       break;
-    case PimCmdEnum::ONCNN_MAC:
-      result = result + operand1 * operand2;
-      break;
+    // case PimCmdEnum::ONCNN_MAC:
+    //   result = result + operand1 * operand2;
+    //   break;
     case PimCmdEnum::DIV:
       if (operand2 == 0)
       {
@@ -624,6 +624,27 @@ protected:
   PimObjId m_src1 = -1;
   PimObjId m_src2 = -1;
   uint64_t m_scalarBits = 0;
+  PimObjId m_dest;
+};
+
+//! @class  pimCmdONCNNMac
+//! @brief  Pim CMD: ON-CNN fused multiply-accumulate with one accumulator per PE run.
+//!         dest[g] += sum_{m<M} src1[g*M+m] * src2[g*M+m], where M = group size of dest
+//!         (dest is allocated with pimAllocAssociatedGrouped(src1, type, M)).
+class pimCmdONCNNMac : public pimCmd
+{
+public:
+  pimCmdONCNNMac(PimCmdEnum cmdType, PimObjId src1, PimObjId src2, PimObjId dest)
+      : pimCmd(cmdType), m_src1(src1), m_src2(src2), m_dest(dest) {}
+  virtual ~pimCmdONCNNMac() {}
+  virtual bool execute() override;
+  virtual bool sanityCheck() const override;
+  virtual bool computeRegion(unsigned index) override;
+  virtual bool updateStats() const override;
+
+private:
+  PimObjId m_src1;
+  PimObjId m_src2;
   PimObjId m_dest;
 };
 

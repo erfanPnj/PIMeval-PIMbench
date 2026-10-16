@@ -91,6 +91,12 @@ pimAllocAssociated(PimObjId assocId, PimDataType dataType)
   return pimSim::get()->pimAllocAssociated(assocId, dataType);
 }
 
+PimObjId
+pimAllocAssociatedGrouped(PimObjId assocId, PimDataType dataType, unsigned groupSize)
+{
+  return pimSim::get()->pimAllocAssociatedGrouped(assocId, dataType, groupSize);
+}
+
 //! @brief  Allocate a global buffer for broadcasting data to all PIM cores
 PimObjId
 pimAllocBuffer(uint32_t numElements, PimDataType dataType)

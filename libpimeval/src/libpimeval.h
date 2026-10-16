@@ -144,6 +144,9 @@ PimStatus pimDeleteDevice();
 // Resource allocation and deletion
 PimObjId pimAlloc(PimAllocEnum allocType, uint64_t numElements, PimDataType dataType);
 PimObjId pimAllocAssociated(PimObjId assocId, PimDataType dataType);
+// Allocate an object with 1 element per groupSize consecutive elements of assocId (e.g. a per-PE accumulator for
+// groupSize = 16 lanes). H layout only; elements per region and total must be divisible by groupSize.
+PimObjId pimAllocAssociatedGrouped(PimObjId assocId, PimDataType dataType, unsigned groupSize);
 // Buffer will always be allocated in H layout; Current assumption is buffer is global and shared across all PIM cores in a chip/device. This assumption is based on AiM.
 // The buffer is used for broadcasting data to all PIM cores in a chip/device.
 // Please note that each chip/device will hold the same data in their respective buffers.
