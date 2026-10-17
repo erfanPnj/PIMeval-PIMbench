@@ -422,7 +422,13 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrix,
   resultMatrix.assign(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
 
   // PE pool: k PEs per PIM core. Grid = (T*R filters) x (C windows), as in the paper.
-  const uint64_t numPEs = (uint64_t)deviceProp.numPIMCores * oncnnPEsPerCore();
+  // const uint64_t numPEs = (uint64_t)deviceProp.numPIMCores * oncnnPEsPerCore();
+
+  // Allow fixing total PEs (e.g. ONCNN_TOTAL_PES=4096) on a fixed memory config
+  const uint64_t maxHardwarePEs = (uint64_t)deviceProp.numPIMCores * oncnnPEsPerCore();
+  const uint64_t targetPEs = (uint64_t)oncnnEnvLong("ONCNN_TOTAL_PES", maxHardwarePEs);
+  const uint64_t numPEs = std::min(maxHardwarePEs, targetPEs);
+
   const int cols = (int)std::min<uint64_t>(kOnCnnCols, numPEs); // C
   const int rowsF = (int)std::max<uint64_t>(1, numPEs / cols);  // T x R
 

@@ -176,7 +176,7 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     totalOp = obj.getNumElements();
     break;
   }
-    case PimCmdEnum::ONCNN_MAC:
+  case PimCmdEnum::ONCNN_MAC:
   {
     // One call = one "wave" of 16-SOP runs on every PE. Cycle count follows the paper:
     //   Eq. 7 : C_SOP = dM + dA*ceil(log2 M) + 2*Pa + ceil(log2 M)
@@ -197,8 +197,9 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     uint64_t activeCores, groupsPerCore, passes;
     if (obj.isLoadBalanced())
     {
-      // same convention as the other Fulcrum models: data is spread evenly over the cores
-      activeCores = std::min<uint64_t>(numCoresAvail, totalGroups);
+      // Pack up to k (m_oncnnPEsPerCore) PE groups onto each active core
+      const uint64_t coresNeeded = (totalGroups + m_oncnnPEsPerCore - 1) / m_oncnnPEsPerCore;
+      activeCores = std::min<uint64_t>(numCoresAvail, std::max<uint64_t>(1, coresNeeded));
       groupsPerCore = (totalGroups + activeCores - 1) / activeCores;
       passes = (groupsPerCore + groupsPerRegionMax - 1) / groupsPerRegionMax;
     }
