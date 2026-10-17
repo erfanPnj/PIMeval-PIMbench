@@ -114,7 +114,7 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
     return;
   }
 
-  int32_t redsum = 0;
+  int64_t redsum = 0;
   status = pimRedSum(srcObj, &redsum);
   if (status != PIM_OK)
   {
@@ -344,7 +344,7 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   // 2. Allocate Grouped Accumulator as PIM_INT16
   // (NOTE: If you want a 32-bit accumulator so VGG16 sums don't overflow 32767,
   //  you can keep this as PIM_INT32 and use std::vector<int32_t> for zeroInit/accOut!)
-  PimObjId accObject = pimAllocAssociatedGrouped(ifmObject, PIM_INT16, kOnCnnLanes);
+  PimObjId accObject = pimAllocAssociatedGrouped(ifmObject, PIM_INT64, kOnCnnLanes);
   if (filterObject == -1 || accObject == -1)
   {
     std::cout << "Function: " << __func__ << " Abort: associated allocation failed" << std::endl;
@@ -359,9 +359,9 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   std::vector<int> ifmVec(vectorLength), fltVec(vectorLength);
   // Host buffers for PIM_INT16 MUST be int16_t (2 bytes per element) for memcpy!
   std::vector<int16_t> ifmVec16(vectorLength), fltVec16(vectorLength);
-  std::vector<int16_t> zeroInit16(activePEs, 0);
+  std::vector<int64_t> zeroInit64(activePEs, 0);
 
-  pimCopyHostToDevice((void *)zeroInit16.data(), accObject);
+  pimCopyHostToDevice((void *)zeroInit64.data(), accObject);
 
   // Algorithm 3 innermost loop: ceil(Cin*Hf*Wf / M) runs per PE
   for (int chunk = 0; chunk < numChunks; ++chunk)
@@ -369,8 +369,17 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
     fillChunk(chunk, ifmVec, fltVec);
     for (int i = 0; i < vectorLength; ++i)
     {
-      ifmVec16[i] = static_cast<int16_t>(ifmVec[i]);
-      fltVec16[i] = static_cast<int16_t>(fltVec[i]);
+      auto to16 = [](int v, const char *what) -> int16_t
+      {
+        if (v < INT16_MIN || v > INT16_MAX)
+        {
+          std::cout << "ON-CNN: " << what << " value " << v << " does not fit in 16 bits" << std::endl;
+          std::exit(1);
+        }
+        return static_cast<int16_t>(v);
+      };
+      ifmVec16[i] = to16(ifmVec[i], "activation");
+      fltVec16[i] = to16(fltVec[i], "weight");
     }
     pimCopyHostToDevice((void *)ifmVec16.data(), ifmObject);
     pimCopyHostToDevice((void *)fltVec16.data(), filterObject);
@@ -378,11 +387,11 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   }
 
   // Copy 16-bit reduced results back and cast to outputMatrix (std::vector<int>)
-  std::vector<int16_t> accOut16(activePEs, 0);
-  pimCopyDeviceToHost(accObject, (void *)accOut16.data());
+  std::vector<int64_t> accOut64(activePEs, 0);
+  pimCopyDeviceToHost(accObject, (void *)accOut64.data());
   for (int pe = 0; pe < activePEs; ++pe)
   {
-    outputMatrix[pe] = static_cast<int>(accOut16[pe]);
+    outputMatrix[pe] = static_cast<int>(accOut64[pe]);
   }
 
   pimFree(accObject);
@@ -391,12 +400,36 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   return true;
 }
 
+// Scale activations into int16 range with a per-layer right shift (like fixed-point requantization)
+inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
+{
+  int maxAbs = 0;
+  for (const auto &ch : x)
+    for (const auto &row : ch)
+      for (int v : row)
+        maxAbs = std::max(maxAbs, v < 0 ? -v : v);
+  int shift = 0;
+  while ((maxAbs >> shift) > INT16_MAX)
+    ++shift;
+  if (shift > 0)
+    for (auto &ch : x)
+      for (auto &row : ch)
+        for (int &v : row)
+          v >>= shift; // arithmetic shift; values are non-negative after RELU
+  return shift;
+}
+
 // Core ON-CNN convolution. weightAt(f, c, r, s) returns weight of filter f, channel c, row r, col s.
-void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrix,
+void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
                 int kernelDepth, int kernelHeight, int kernelWidth,
                 const std::function<int(int, int, int, int)> &weightAt,
                 std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
 {
+  std::vector<std::vector<std::vector<int>>> inputMatrix = inputMatrixIn; // local copy
+  const int shift = oncnnRequantize(inputMatrix);
+  if (shift > 0 && std::getenv("ONCNN_VERBOSE"))
+    std::cout << "ON-CNN: activations right-shifted by " << shift << " to fit 16 bits" << std::endl;
+
   PimDeviceProperties deviceProp;
   if (pimGetDeviceProperties(&deviceProp) != PIM_OK)
   {
