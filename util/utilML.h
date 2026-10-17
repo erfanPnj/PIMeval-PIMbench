@@ -332,16 +332,19 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   const int vectorLength = activePEs * kOnCnnLanes; // one 16-lane group per PE
   outputMatrix.assign(activePEs, 0);
 
-  // IFM and filter operands: 16 lanes per PE, living side by side in the same regions.
-  PimObjId ifmObject = pimAlloc(PIM_ALLOC_AUTO, vectorLength, PIM_INT32);
+  // 1. Allocate 16-bit IFM and Filter objects
+  PimObjId ifmObject = pimAlloc(PIM_ALLOC_AUTO, vectorLength, PIM_INT16);
   if (ifmObject == -1)
   {
     std::cout << "Function: " << __func__ << " Abort: pimAlloc failed" << std::endl;
     return false;
   }
-  PimObjId filterObject = pimAllocAssociated(ifmObject, PIM_INT32);
-  // One accumulator element per PE: element p belongs to lanes [p*16, p*16+16) of the operand objects.
-  PimObjId accObject = pimAllocAssociatedGrouped(ifmObject, PIM_INT32, kOnCnnLanes);
+  PimObjId filterObject = pimAllocAssociated(ifmObject, PIM_INT16);
+
+  // 2. Allocate Grouped Accumulator as PIM_INT16
+  // (NOTE: If you want a 32-bit accumulator so VGG16 sums don't overflow 32767,
+  //  you can keep this as PIM_INT32 and use std::vector<int32_t> for zeroInit/accOut!)
+  PimObjId accObject = pimAllocAssociatedGrouped(ifmObject, PIM_INT16, kOnCnnLanes);
   if (filterObject == -1 || accObject == -1)
   {
     std::cout << "Function: " << __func__ << " Abort: associated allocation failed" << std::endl;
@@ -353,20 +356,34 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
     return false;
   }
 
-  std::vector<int> ifmVec(vectorLength), fltVec(vectorLength), zeroInit(activePEs, 0);
-  pimCopyHostToDevice((void *)zeroInit.data(), accObject);
+  std::vector<int> ifmVec(vectorLength), fltVec(vectorLength);
+  // Host buffers for PIM_INT16 MUST be int16_t (2 bytes per element) for memcpy!
+  std::vector<int16_t> ifmVec16(vectorLength), fltVec16(vectorLength);
+  std::vector<int16_t> zeroInit16(activePEs, 0);
+
+  pimCopyHostToDevice((void *)zeroInit16.data(), accObject);
 
   // Algorithm 3 innermost loop: ceil(Cin*Hf*Wf / M) runs per PE
   for (int chunk = 0; chunk < numChunks; ++chunk)
   {
     fillChunk(chunk, ifmVec, fltVec);
-    pimCopyHostToDevice((void *)ifmVec.data(), ifmObject);
-    pimCopyHostToDevice((void *)fltVec.data(), filterObject);
+    for (int i = 0; i < vectorLength; ++i)
+    {
+      ifmVec16[i] = static_cast<int16_t>(ifmVec[i]);
+      fltVec16[i] = static_cast<int16_t>(fltVec[i]);
+    }
+    pimCopyHostToDevice((void *)ifmVec16.data(), ifmObject);
+    pimCopyHostToDevice((void *)fltVec16.data(), filterObject);
     pimONCNNMac(ifmObject, filterObject, accObject);
   }
 
-  // activePEs ints come back, already reduced over the 16 lanes
-  pimCopyDeviceToHost(accObject, outputMatrix.data());
+  // Copy 16-bit reduced results back and cast to outputMatrix (std::vector<int>)
+  std::vector<int16_t> accOut16(activePEs, 0);
+  pimCopyDeviceToHost(accObject, (void *)accOut16.data());
+  for (int pe = 0; pe < activePEs; ++pe)
+  {
+    outputMatrix[pe] = static_cast<int>(accOut16[pe]);
+  }
 
   pimFree(accObject);
   pimFree(filterObject);
@@ -386,8 +403,8 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrix,
     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
     exit(1);
   }
-  // 16-lane groups must not straddle a row region (32-bit elements)
-  if (deviceProp.numColPerSubarray % (kOnCnnLanes * 32) != 0)
+  // 16-lane groups must not straddle a row region (16-bit elements)
+  if (deviceProp.numColPerSubarray % (kOnCnnLanes * 16) != 0)
   {
     std::cout << "Abort: numColPerSubarray must be a multiple of 512 for ON-CNN 16-lane groups" << std::endl;
     exit(1);
