@@ -21,5 +21,8 @@ PIMbench/vgg16/PIM/normal_vgg16.txt
 PIMbench/vgg16/PIM/on_cnn_vgg16.txt
 PIMbench/results/*.txt
 
+PIMbench/vgg16/bus-128-bit
+PIMbench/vgg16/bus-no-limit
+
 test_oncnn.*
 test_oncnn

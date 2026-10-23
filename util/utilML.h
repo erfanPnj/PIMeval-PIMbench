@@ -361,6 +361,13 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   std::vector<int16_t> ifmVec16(vectorLength), fltVec16(vectorLength);
   std::vector<int64_t> zeroInit64(activePEs, 0);
 
+  // --- LOGGING: Accumulator Initialization ---
+  const char *logEnv = std::getenv("ONCNN_LOG_DETAILS");
+  if (logEnv && std::atoi(logEnv) > 0)
+  {
+    std::printf("[DATA_COPY] H2D Zero-Init Acc: %zu bytes\n", activePEs * sizeof(int64_t));
+  }
+
   pimCopyHostToDevice((void *)zeroInit64.data(), accObject);
 
   // Algorithm 3 innermost loop: ceil(Cin*Hf*Wf / M) runs per PE
@@ -388,6 +395,13 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
 
   // Copy 16-bit reduced results back and cast to outputMatrix (std::vector<int>)
   std::vector<int64_t> accOut64(activePEs, 0);
+
+  // --- LOGGING: Device to Host Read ---
+  if (logEnv && std::atoi(logEnv) > 0)
+  {
+    std::printf("[DATA_COPY] D2H Read Acc: %zu bytes\n", activePEs * sizeof(int64_t));
+  }
+
   pimCopyDeviceToHost(accObject, (void *)accOut64.data());
   for (int pe = 0; pe < activePEs; ++pe)
   {
@@ -439,7 +453,7 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   // 16-lane groups must not straddle a row region (16-bit elements)
   if (deviceProp.numColPerSubarray % (kOnCnnLanes * 16) != 0)
   {
-    std::cout << "Abort: numColPerSubarray must be a multiple of 512 for ON-CNN 16-lane groups" << std::endl;
+    std::cout << "Abort: numColPerSubarray must be a multiple of 256 for ON-CNN 16-lane groups" << std::endl;
     exit(1);
   }
 

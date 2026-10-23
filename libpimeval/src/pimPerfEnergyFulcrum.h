@@ -29,16 +29,18 @@ public:
     //   ONCNN_CLK_NS       : PE clock period in ns                 (1.2 = SS, 1.1 = SP, paper Sec. IV-C)
     //   ONCNN_PORT_BITS    : walker->PE bits/cycle, 0 = ideal      (default 0, paper has no such limit)
     //   ONCNN_ROW_ACCESS   : 1 = also charge DRAM row rd/wr time   (default 0, Eq. 10 has no such term)
-    auto envLong = [](const char *name, long def, long minV) -> long {
+    auto envLong = [](const char *name, long def, long minV) -> long
+    {
       const char *s = std::getenv(name);
-      if (!s || !*s) return def;
+      if (!s || !*s)
+        return def;
       return std::max(minV, std::atol(s));
     };
     m_oncnnPEsPerCore = (unsigned)envLong("ONCNN_PES_PER_CORE", m_oncnnPEsPerCore, 1);
     m_oncnnDeltaM = (unsigned)envLong("ONCNN_DELTA_M", m_oncnnDeltaM, 0);
     m_oncnnPa = (unsigned)envLong("ONCNN_PA", m_oncnnPa, 1);
     m_oncnnPortBits = (unsigned)envLong("ONCNN_PORT_BITS", m_oncnnPortBits, 0);
-    m_oncnnChargeRowAccess = envLong("ONCNN_ROW_ACCESS", 0, 0) != 0;
+    m_oncnnChargeRowAccess = envLong("ONCNN_ROW_ACCESS", m_oncnnChargeRowAccess ? 1 : 0, 0) != 0;
     if (const char *s = std::getenv("ONCNN_CLK_NS"))
       if (std::atof(s) > 0.0)
         m_oncnnClkMs = std::atof(s) * 1e-6; // ns -> ms
@@ -68,8 +70,8 @@ protected:
   unsigned m_oncnnDeltaA = 2;           // delta_A: online adder delay
   unsigned m_oncnnPa = 16;              // Pa: activation precision in bits (paper: 16)
   unsigned m_oncnnPEsPerCore = 4;       // k
-  unsigned m_oncnnPortBits = 64;         // 0 = ideal (paper); >0 limits walker->PE bits per cycle
-  bool m_oncnnChargeRowAccess = true;  // false = paper-exact Eq. 10 (no DRAM row time)
+  unsigned m_oncnnPortBits = 128;       // 0 = ideal (paper); >0 limits walker->PE bits per cycle
+  bool m_oncnnChargeRowAccess = true;   // false = paper-exact Eq. 10 (no DRAM row time)
   bool m_oncnnChargeDestWrite = true;   // only used when m_oncnnChargeRowAccess / energy
 };
 

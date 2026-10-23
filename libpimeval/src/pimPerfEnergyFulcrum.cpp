@@ -194,29 +194,31 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     const uint64_t groupsPerRegionMax = std::max<uint64_t>(1, maxElementsPerRegion / kLanes);
     const uint64_t numCoresAvail = obj.getNumCoreAvailable();
 
-    uint64_t activeCores, groupsPerCore, passes;
-    if (obj.isLoadBalanced())
-    {
-      // Pack up to k (m_oncnnPEsPerCore) PE groups onto each active core
-      const uint64_t coresNeeded = (totalGroups + m_oncnnPEsPerCore - 1) / m_oncnnPEsPerCore;
-      activeCores = std::min<uint64_t>(numCoresAvail, std::max<uint64_t>(1, coresNeeded));
-      groupsPerCore = (totalGroups + activeCores - 1) / activeCores;
-      passes = (groupsPerCore + groupsPerRegionMax - 1) / groupsPerRegionMax;
-    }
-    else
-    {
-      // physical packing (full-width regions): the busiest core decides the time
-      activeCores = obj.getNumCoresUsed();
-      passes = numPass;
-      groupsPerCore = std::min<uint64_t>(passes * groupsPerRegionMax, totalGroups);
-    }
+    // All available cores in the scaled RAM config are active and share the PE groups evenly
+    const uint64_t activeCores = numCoresAvail;
+    const uint64_t groupsPerCore = std::max<uint64_t>(1, (totalGroups + activeCores - 1) / activeCores);
+    const uint64_t passes = (groupsPerCore + groupsPerRegionMax - 1) / groupsPerRegionMax;
 
     // k PEs of a core share its walkers and split the core's groups into waves
-    const uint64_t k = std::max<uint64_t>(1, std::min<uint64_t>(m_oncnnPEsPerCore, groupsPerCore));
+    const uint64_t k = std::max<uint64_t>(1, m_oncnnPEsPerCore);
     const double waves = std::ceil((double)groupsPerCore / (double)k);
     double cycles = waves * cyclesPerGroup;
 
-    // optional (off by default): walker -> PE port bandwidth limit
+    // logging
+    const char *logEnv = std::getenv("ONCNN_LOG_DETAILS");
+    if (logEnv && std::atoi(logEnv) > 0)
+    {
+      std::printf("[ONCNN_MAC] numCoresAvail: %llu | activeCores: %llu | totalGroups: %llu | groupsPerCore: %llu | k: %llu | passes: %llu | waves: %.1f\n",
+                  (unsigned long long)numCoresAvail,
+                  (unsigned long long)activeCores,
+                  (unsigned long long)totalGroups,
+                  (unsigned long long)groupsPerCore,
+                  (unsigned long long)k,
+                  (unsigned long long)passes,
+                  waves);
+    }
+
+    // walker -> PE port bandwidth limit
     const double bitsPerGroup = 2.0 * kLanes * bitsPerElement;
     if (m_oncnnPortBits > 0)
     {
@@ -224,13 +226,13 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
       cycles = std::max(cycles, portCycles);
     }
 
-    // optional (off by default): DRAM row access time, which Eq. 10 does not contain
+    // DRAM row access time
     msRead = m_oncnnChargeRowAccess ? 2 * m_tR * passes : 0.0;
     msWrite = (m_oncnnChargeRowAccess && m_oncnnChargeDestWrite) ? m_tW * passes : 0.0;
     msALU = cycles * m_oncnnClkMs;
     msRuntime = msRead + msWrite + msALU;
 
-    // Energy: row activations + walker shifts + PE energy + background (unchanged)
+    // Energy: row activations + walker shifts + PE energy + background
     const double rowOpsPerPass = m_oncnnChargeDestWrite ? 3.0 : 2.0;
     const double wordsPerGroup = std::ceil(bitsPerGroup / m_fulcrumAluBitWidth) + 1; // +1 result word
     mjEnergy = activeCores * passes * rowOpsPerPass * m_eAP;
