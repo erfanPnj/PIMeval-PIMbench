@@ -414,22 +414,45 @@ bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, 
   return true;
 }
 
-// Scale activations into int16 range with a per-layer right shift (like fixed-point requantization)
+// Percentile-calibrated, round-to-nearest, saturating requantization to int16.
 inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
 {
-  int maxAbs = 0;
+  std::vector<int> mags; // |v| of non-zero activations
   for (const auto &ch : x)
     for (const auto &row : ch)
       for (int v : row)
-        maxAbs = std::max(maxAbs, v < 0 ? -v : v);
+        if (v != 0)
+          mags.push_back(v < 0 ? -v : v);
+  if (mags.empty())
+    return 0;
+
+  const char *pe = std::getenv("ONCNN_CALIB_PCT");
+  const double pct = (pe && *pe) ? std::atof(pe) : 0.9999;
+  const size_t k = std::min(mags.size() - 1, (size_t)(pct * mags.size()));
+  std::nth_element(mags.begin(), mags.begin() + k, mags.end());
+  const int ref = mags[k];
   int shift = 0;
-  while ((maxAbs >> shift) > INT16_MAX)
+  while ((ref >> shift) > INT16_MAX)
     ++shift;
+
   if (shift > 0)
+  {
+    const int64_t half = int64_t(1) << (shift - 1);
+    size_t clipped = 0, zeroed = 0;
     for (auto &ch : x)
       for (auto &row : ch)
         for (int &v : row)
-          v >>= shift; // arithmetic shift; values are non-negative after RELU
+        {
+          const int64_t a = v < 0 ? -(int64_t)v : v;
+          int64_t q = (a + half) >> shift; // round to nearest
+          if (q > INT16_MAX) { q = INT16_MAX; ++clipped; } // saturate
+          if (a != 0 && q == 0) ++zeroed;
+          v = (int)(v < 0 ? -q : q);
+        }
+    if (std::getenv("ONCNN_VERBOSE"))
+      std::cout << "ON-CNN requant: shift=" << shift << " clipped=" << clipped
+                << " nonzero->0=" << zeroed << std::endl;
+  }
   return shift;
 }
 
