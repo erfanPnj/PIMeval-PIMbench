@@ -1,0 +1,9 @@
+stage 0: conv 4d -> (8, 12, 16)  input shift=0 clipped=0 nonzero->0=0
+stage 1: relu -> (8, 12, 16)
+stage 2: pool -> (8, 6, 8)
+stage 3: conv 3d -> (16, 6, 8)  input shift=0 clipped=0 nonzero->0=0
+stage 4: relu -> (16, 6, 8)
+stage 5: pool -> (16, 3, 4)
+stage 6: conv 4d -> (20, 3, 4)  input shift=4 clipped=0 nonzero->0=0
+stage 7: relu -> (20, 3, 4)
+stage 8: conv 3d -> (8, 2, 2)  input shift=5 clipped=0 nonzero->0=0
