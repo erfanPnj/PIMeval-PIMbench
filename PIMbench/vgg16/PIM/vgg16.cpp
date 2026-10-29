@@ -173,7 +173,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv1-1........\n";
 
   // RELU
@@ -220,7 +220,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv1-2........\n";
 
   // RELU
@@ -276,7 +276,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv2-1........\n";
 
   // RELU
@@ -323,7 +323,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv2-2........\n";
 
   // RELU
@@ -376,7 +376,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv3-1........\n";
 
   // RELU
@@ -423,7 +423,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv3-2........\n";
 
   // RELU
@@ -470,7 +470,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv3-3........\n";
 
   // RELU
@@ -523,7 +523,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv4-1........\n";
 
   // RELU
@@ -570,7 +570,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv4-2........\n";
 
   // RELU
@@ -617,7 +617,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv4-3........\n";
 
   // RELU
@@ -670,7 +670,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv5-1........\n";
 
   // RELU
@@ -717,7 +717,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv5-2........\n";
 
   // RELU
@@ -764,7 +764,7 @@ int main(int argc, char *argv[])
     std::cout << "Kernel matrix dimensions: ";
     printMatrixDimensions(kernelMatrix);
   }
-  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 1);
+  conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0);
   std::cout << "........ending conv5-3........\n";
 
   // RELU

@@ -2,7 +2,7 @@
 # usage:  BIN=./test_net.out CFG=/path/to/config.cfg QUANT=new bash run_net_tests.sh
 #   QUANT = new (percentile requantizer, default) or old (your original max-shift one)
 BIN=${BIN:-./test_net.out}
-CFG=${CFG:-/home/erfan/Desktop/pim-oncnn/PIMeval-PIMbench/configs/taco/PIMeval_Fulcrum_Bank128-8192.cfg}
+CFG=${CFG:-/home/erfan/Desktop/oncnn-pim/PIMeval-PIMbench/configs/taco/PIMeval_Fulcrum_Bank128-8192.cfg}
 QUANT=${QUANT:-new}
 pass=0; fail=0
 

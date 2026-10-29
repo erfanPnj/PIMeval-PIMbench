@@ -202,7 +202,6 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     // k PEs of a core share its walkers and split the core's groups into waves
     const uint64_t k = std::max<uint64_t>(1, m_oncnnPEsPerCore);
     const double waves = std::ceil((double)groupsPerCore / (double)k);
-    double cycles = waves * cyclesPerGroup;
 
     // logging
     const char *logEnv = std::getenv("ONCNN_LOG_DETAILS");
@@ -218,18 +217,22 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
                   waves);
     }
 
-    // walker -> PE port bandwidth limit
+    // PE compute time (PE clock)
+    const double peMs = waves * cyclesPerGroup * m_oncnnClkMs;
+
+    // walker -> PE port limit (port clock); disabled when m_oncnnPortBits == 0
     const double bitsPerGroup = 2.0 * kLanes * bitsPerElement;
+    double portMs = 0.0;
     if (m_oncnnPortBits > 0)
     {
-      const double portCycles = groupsPerCore * std::ceil(bitsPerGroup / m_oncnnPortBits);
-      cycles = std::max(cycles, portCycles);
+      const double portTransfers = groupsPerCore * std::ceil(bitsPerGroup / m_oncnnPortBits);
+      portMs = portTransfers * m_oncnnPortClkMs;
     }
+    msALU = std::max(peMs, portMs);
 
     // DRAM row access time
     msRead = m_oncnnChargeRowAccess ? 2 * m_tR * passes : 0.0;
     msWrite = (m_oncnnChargeRowAccess && m_oncnnChargeDestWrite) ? m_tW * passes : 0.0;
-    msALU = cycles * m_oncnnClkMs;
     msRuntime = msRead + msWrite + msALU;
 
     // Energy: row activations + walker shifts + PE energy + background

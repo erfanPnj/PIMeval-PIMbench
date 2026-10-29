@@ -27,8 +27,8 @@ public:
     //   ONCNN_DELTA_M      : online delay of the multiplier        (3 = ON-CNN_SS, 2 = ON-CNN_SP)
     //   ONCNN_PA           : activation precision Pa in bits       (default 16, as in the paper)
     //   ONCNN_CLK_NS       : PE clock period in ns                 (1.2 = SS, 1.1 = SP, paper Sec. IV-C)
-    //   ONCNN_PORT_BITS    : walker->PE bits/cycle, 0 = ideal      (default 0, paper has no such limit)
-    //   ONCNN_ROW_ACCESS   : 1 = also charge DRAM row rd/wr time   (default 0, Eq. 10 has no such term)
+    //   ONCNN_PORT_BITS    : walker->PE bits/cycle, 0 = ideal      (default 128, paper has no such limit)
+    //   ONCNN_ROW_ACCESS   : 1 = also charge DRAM row rd/wr time   (default 1, Eq. 10 has no such term)
     auto envLong = [](const char *name, long def, long minV) -> long
     {
       const char *s = std::getenv(name);
@@ -44,6 +44,8 @@ public:
     if (const char *s = std::getenv("ONCNN_CLK_NS"))
       if (std::atof(s) > 0.0)
         m_oncnnClkMs = std::atof(s) * 1e-6; // ns -> ms
+    const char *pc = std::getenv("ONCNN_PORT_CLK_NS");
+    m_oncnnPortClkMs = (pc && *pc) ? std::atof(pc) * 1e-6 : m_oncnnClkMs; // default = PE clock
   }
   virtual ~pimPerfEnergyFulcrum() {}
 
@@ -65,6 +67,7 @@ protected:
 
   // ON-CNN PE block (Shafique & Lee, IEEE Access 2024)
   double m_oncnnClkMs = 1.2e-6;         // 1.2 ns (ON-CNN_SS synthesis result, Eq. 11); 1.1 ns for SP
+  double m_oncnnPortClkMs;              // period of the walker->PE port, in ms
   double m_oncnnGroupEnergyMj = 1.9e-7; // ~190 pJ per 16-SOP run (paper Table 6 power / 4096 PEs)
   unsigned m_oncnnDeltaM = 3;           // delta_M: 3 (OSSM) or 2 (OSPM)
   unsigned m_oncnnDeltaA = 2;           // delta_A: online adder delay
