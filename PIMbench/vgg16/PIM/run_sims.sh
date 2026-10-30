@@ -10,6 +10,8 @@ for k in 1 2 4 8 16 32 64 128; do
     
     # تنظیم متغیر محیطی
     export ONCNN_PES_PER_CORE=$k
+    export ONCNN_TOTAL_PES=4096
+    export ONCNN_LOG_DETAILS=0
     
     # تعیین نام فایل خروجی به همراه مسیر پوشه
     output_file="edited-padding-results/edited-padding-k${k}.txt"
