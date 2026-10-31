@@ -1,4 +1,4 @@
-# Makefile: C++ version of vgg16 and test_conv
+# Makefile: C++ version of vgg16 and test_net
 # Copyright (c) 2024 University of Virginia
 # This file is licensed under the MIT License.
 # See the LICENSE file in the root of this repository for more details.
@@ -22,7 +22,7 @@ ifeq ($(COMPILE_WITH_JPEG), 1)
 endif
 
 # Define both executables
-EXECS := vgg16.out test_conv.out
+EXECS := vgg16.out test_net.out
 
 debug perf dramsim3_integ: $(EXECS)
 
@@ -30,8 +30,8 @@ debug perf dramsim3_integ: $(EXECS)
 vgg16.out: vgg16.cpp $(DEPS)
 	$(CXX) $< $(CXXFLAGS) $(LDFLAGS) -o $@
 
-# Rule for test_conv
-test_conv.out: test_conv.cpp $(DEPS)
+# Rule for test_net
+test_net.out: test_net.cpp $(DEPS)
 	$(CXX) $< $(CXXFLAGS) $(LDFLAGS) -o $@
 
 clean:
