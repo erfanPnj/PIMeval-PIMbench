@@ -1004,3 +1004,9 @@ PimStatus pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest)
   bool ok = pimSim::get()->pimONCNNMac(src1, src2, dest);
   return ok ? PIM_OK : PIM_ERROR;
 }
+
+PimStatus pimONCNNLoadOperands(PimObjId ifmObj, PimObjId fltObj, const void *ifmUnique, const void *fltUnique, unsigned curF, unsigned curW)
+{
+  bool ok = pimSim::get()->pimONCNNLoadOperands(ifmObj, fltObj, ifmUnique, fltUnique, curF, curW);
+  return ok ? PIM_OK : PIM_ERROR;
+}

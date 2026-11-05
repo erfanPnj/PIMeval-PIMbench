@@ -4,15 +4,42 @@
 #   SEED    : integer, makes the random data reproducible
 #   QUANT   : new = percentile requantizer (ONCNN_CALIB_PCT, default 0.9999, round-to-nearest, saturate)
 #             old = max-based floor shift (your original oncnnRequantize)
-import sys, os
+import sys, os, math
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view as swv
 
 profile, seed, quant = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 assert profile in ("A", "B") and quant in ("old", "new")
 PCT = float(os.environ.get("ONCNN_CALIB_PCT", "0.9999"))
+PACK = os.environ.get("ONCNN_PACK", "flat").lower()
+assert PACK in ("flat", "pixel")
+VARIANT = os.environ.get("ONCNN_VARIANT", "SS").upper()
+assert VARIANT in ("SS", "SP")
+TOTAL_PES = int(os.environ.get("ONCNN_TOTAL_PES", "4096"))
+LANES = 16
+COLS_C = 16
+DELTA_M = int(os.environ.get("ONCNN_DELTA_M", "2" if VARIANT == "SP" else "3"))
+DELTA_A = int(os.environ.get("ONCNN_DELTA_A", "2"))
+PA_BITS = int(os.environ.get("ONCNN_PA", "16"))
+TREE_LVL = int(math.ceil(math.log2(LANES)))
+C_SOP = DELTA_M + DELTA_A * TREE_LVL + 2 * PA_BITS + TREE_LVL
 INT16_MAX = 32767
 rng = np.random.default_rng(seed)
+
+def ceil_div(a, b):
+    return (a + b - 1) // b
+
+def ref_chunks_and_calls(cout, hout, wout, cin, kh, kw, num_pes=TOTAL_PES, pack=PACK):
+    cols = min(COLS_C, num_pes)
+    rows_f = max(1, num_pes // cols)
+    outer = ceil_div(cout, rows_f) * ceil_div(hout * wout, cols)
+    if pack == "pixel":
+        chunks = kh * kw * ceil_div(cin, LANES)
+        cycles = outer * (C_SOP + 1) * chunks
+    else:
+        chunks = ceil_div(cin * kh * kw, LANES)
+        cycles = outer * ceil_div((C_SOP + 1) * cin * kh * kw, LANES)
+    return chunks, outer * chunks, cycles
 
 # ---- network description: (type, params...) ----------------------------------------------
 C, H, W = 3, 12, 16
@@ -62,6 +89,8 @@ XMAX, WMAX = (4, 1) if profile == "A" else (256, 7)                 # B: pixel-l
 x = rng.integers(0, XMAX, size=(C, H, W)).astype(np.int64)
 meta, weights, expected = [f"input {C} {H} {W}"], [], []
 cur = x
+total_calls = 0
+total_cycles = 0
 for li, st in enumerate(net):
     if st[0] == "conv":
         _, cout, kh, kw, stride, pad, mode = st
@@ -75,7 +104,10 @@ for li, st in enumerate(net):
         if profile == "A": assert s == 0, "profile A must not need requantization"
         cur = conv(xq, w4, stride, pad)
         assert np.abs(cur).max() < 2**31
-        print(f"stage {li}: conv {mode} -> {cur.shape}  input shift={s} clipped={clipped} nonzero->0={zeroed}")
+        chunks, calls, cyc = ref_chunks_and_calls(cout, cur.shape[1], cur.shape[2], cin, kh, kw)
+        total_calls += calls
+        total_cycles += cyc
+        print(f"stage {li}: conv {mode} -> {cur.shape}  input shift={s} clipped={clipped} nonzero->0={zeroed}  chunks={chunks} calls={calls} eq10_cycles={cyc}")
         meta.append(f"conv {cout} {kh} {kw} {stride} {pad} {mode}")
     elif st[0] == "relu":
         cur = np.maximum(cur, 0); meta.append("relu")
@@ -84,6 +116,7 @@ for li, st in enumerate(net):
         cur = pool(cur, st[1], st[2]); meta.append(f"pool {st[1]} {st[2]}")
         print(f"stage {li}: pool -> {cur.shape}")
     expected.append(cur.flatten())
+print(f"ref_summary: pack={PACK} variant={VARIANT} total_calls={total_calls} total_eq10_cycles={total_cycles}")
 sv = lambda arr, fn: open(fn, "w").write(" ".join(map(str, arr.tolist())))
 sv(x.flatten(), "net_input.txt")
 sv(np.concatenate([w.flatten() for w in weights]), "net_weights.txt")

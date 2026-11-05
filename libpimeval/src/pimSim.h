@@ -140,6 +140,7 @@ public:
   bool pimOFC(PimObjId src, PimObjId dest);
   bool pimOAReduce(PimObjId src, void *result);
   bool pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest);
+  bool pimONCNNLoadOperands(PimObjId ifmObj, PimObjId fltObj, const void *ifmUnique, const void *fltUnique, unsigned curF, unsigned curW);
 
   // PIM API Fusion
   bool pimFuse(PimProg prog);

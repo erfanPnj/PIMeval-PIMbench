@@ -178,15 +178,17 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
   }
   case PimCmdEnum::ONCNN_MAC:
   {
-    // One call = one "wave" of 16-SOP runs on every PE. Cycle count follows the paper:
-    //   Eq. 7 : C_SOP = dM + dA*ceil(log2 M) + 2*Pa + ceil(log2 M)
-    //   Eq. 8 : one PE run = C_SOP + 1 cycles (the +1 is the reset cycle)
-    // The host calls this once per chunk of M=16 flattened (Cin*Hf*Wf) elements, so summed over
-    // all calls the total equals Eq. 10 / Eq. 9: (C_SOP + 1) * ceil(Cin*Hf*Wf / M) per PE pass.
-    constexpr uint64_t kLanes = 16;  // M: multipliers per PE
-    constexpr unsigned kTreeLvl = 4; // ceil(log2(M))
+    // One call = one wave of 16-SOP runs across the active PE grid.
+    // Cycle count per PE run is derived from Paper Eq. 7 & Eq. 8:
+    //   Eq. 7 : C_SOP = dM + dA*ceil(log2 M) + 2*Pa + ceil(log2 M)  (47 for SS, 46 for SP)
+    //   Eq. 8 : one PE run = C_SOP + 1 cycles (+1 reset cycle R_C)
+    // Note:
+    //   - ONCNN_PORT_BITS defaults to 128 (Fulcrum walker->PE port limit); set 0 for ideal paper port.
+    //   - ONCNN_ROW_ACCESS defaults to 1 (true, charges DRAM row read/write per pass); set 0 for pure Eq. 10.
+    //   - Tile/column power gating (Paper Sec. IV-D) is not modeled; all activeCores are charged.
+    constexpr uint64_t kLanes = 16; // M: multipliers per PE
 
-    const unsigned cSop = m_oncnnDeltaM + m_oncnnDeltaA * kTreeLvl + 2 * m_oncnnPa + kTreeLvl;
+    const unsigned cSop = getOnCnnCsop((unsigned)kLanes);
     const unsigned cyclesPerGroup = cSop + 1;
 
     // 16 adjacent elements = one PE run
@@ -220,7 +222,7 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     // PE compute time (PE clock)
     const double peMs = waves * cyclesPerGroup * m_oncnnClkMs;
 
-    // walker -> PE port limit (port clock); disabled when m_oncnnPortBits == 0
+    // walker -> PE port limit (port clock); disabled when m_oncnnPortBits == 0 (default is 128)
     const double bitsPerGroup = 2.0 * kLanes * bitsPerElement;
     double portMs = 0.0;
     if (m_oncnnPortBits > 0)
@@ -230,12 +232,12 @@ pimPerfEnergyFulcrum::getPerfEnergyForFunc2(PimCmdEnum cmdType, const pimObjInfo
     }
     msALU = std::max(peMs, portMs);
 
-    // DRAM row access time
+    // DRAM row access time (enabled by default: m_oncnnChargeRowAccess == true)
     msRead = m_oncnnChargeRowAccess ? 2 * m_tR * passes : 0.0;
     msWrite = (m_oncnnChargeRowAccess && m_oncnnChargeDestWrite) ? m_tW * passes : 0.0;
     msRuntime = msRead + msWrite + msALU;
 
-    // Energy: row activations + walker shifts + PE energy + background
+    // Energy: row activations + walker shifts + PE energy + background (charges all activeCores)
     const double rowOpsPerPass = m_oncnnChargeDestWrite ? 3.0 : 2.0;
     const double wordsPerGroup = std::ceil(bitsPerGroup / m_fulcrumAluBitWidth) + 1; // +1 result word
     mjEnergy = activeCores * passes * rowOpsPerPass * m_eAP;

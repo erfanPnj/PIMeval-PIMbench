@@ -104,7 +104,9 @@ pimCmd::getName(PimCmdEnum cmdType, const std::string &suffix)
       {PimCmdEnum::OSSM, "ossm"},
       {PimCmdEnum::OFC, "ofc"},
       {PimCmdEnum::OA_REDUCE, "oa_reduce"},
-      {PimCmdEnum::ONCNN_MAC, "oncnn_mac"}};
+      {PimCmdEnum::ONCNN_MAC, "oncnn_mac"},
+      {PimCmdEnum::ONCNN_LOAD_OPERANDS, "oncnn_load_operands"}
+    };
   auto it = cmdNames.find(cmdType);
   return it != cmdNames.end() ? it->second + suffix : "unknown";
 }
@@ -890,6 +892,134 @@ bool pimCmdFunc2::updateStats() const
 
   pimeval::perfEnergy mPerfEnergy = pimSim::get()->getPerfEnergyModel()->getPerfEnergyForFunc2(m_cmdType, objSrc1, objSrc2, objDest);
   pimSim::get()->getStatsMgr()->recordCmd(getName(dataType, isVLayout), mPerfEnergy);
+  return true;
+}
+
+//! @brief  PIM CMD: ON-CNN Load Operands (broadcast unique IFM windows across rows and filters across cols)
+bool pimCmdONCNNLoadOperands::execute()
+{
+  if (!sanityCheck())
+  {
+    return false;
+  }
+
+  if (!pimSim::get()->isAnalysisMode())
+  {
+    pimObjInfo &objIfm = m_device->getResMgr()->getObjInfo(m_ifmObj);
+    pimObjInfo &objFlt = m_device->getResMgr()->getObjInfo(m_fltObj);
+
+    constexpr unsigned kLanes = 16;
+    const uint64_t activePEs = static_cast<uint64_t>(m_curF) * static_cast<uint64_t>(m_curW);
+    const uint64_t totalElems = activePEs * kLanes;
+
+    const int16_t *ifmU = static_cast<const int16_t *>(m_ifmUnique);
+    const int16_t *fltU = static_cast<const int16_t *>(m_fltUnique);
+    std::vector<int16_t> ifmExpanded(totalElems, 0);
+    std::vector<int16_t> fltExpanded(totalElems, 0);
+
+    // Negative-control hook (ONCNN_BAD_BROADCAST=1): deliberately break the PE mapping
+    // (transpose pe = win * curF + filt, or reverse win when curF == 1) so tests must fail.
+    const char *badEnv = std::getenv("ONCNN_BAD_BROADCAST");
+    const bool badMapping = (badEnv && std::atoi(badEnv) != 0);
+
+    for (unsigned filt = 0; filt < m_curF; ++filt)
+    {
+      for (unsigned win = 0; win < m_curW; ++win)
+      {
+        uint64_t pe = static_cast<uint64_t>(filt) * m_curW + win;
+        if (badMapping)
+        {
+          pe = (m_curF > 1) ? (static_cast<uint64_t>(win) * m_curF + filt)
+                            : static_cast<uint64_t>(m_curW - 1 - win);
+        }
+        const int16_t *wSrc = ifmU + static_cast<uint64_t>(win) * kLanes;
+        const int16_t *fSrc = fltU + static_cast<uint64_t>(filt) * kLanes;
+        int16_t *wDst = ifmExpanded.data() + pe * kLanes;
+        int16_t *fDst = fltExpanded.data() + pe * kLanes;
+        for (unsigned l = 0; l < kLanes; ++l)
+        {
+          wDst[l] = wSrc[l];
+          fDst[l] = fSrc[l];
+        }
+      }
+    }
+
+    objIfm.copyFromHost(ifmExpanded.data(), 0, totalElems);
+    objFlt.copyFromHost(fltExpanded.data(), 0, totalElems);
+  }
+
+  if (pimSim::get()->getDeviceType() != PIM_FUNCTIONAL)
+  {
+    const pimObjInfo &objIfm = m_device->getResMgr()->getObjInfo(m_ifmObj);
+    const pimObjInfo &objFlt = m_device->getResMgr()->getObjInfo(m_fltObj);
+    objIfm.syncToSimulatedMem();
+    objFlt.syncToSimulatedMem();
+  }
+
+  updateStats();
+  return true;
+}
+
+//! @brief  PIM CMD: ON-CNN Load Operands - sanity check
+bool pimCmdONCNNLoadOperands::sanityCheck() const
+{
+  pimResMgr *resMgr = m_device->getResMgr();
+  if (!m_ifmUnique || !m_fltUnique)
+  {
+    std::printf("PIM-Error: Invalid null pointer in %s\n", getName().c_str());
+    return false;
+  }
+  if (!isValidObjId(resMgr, m_ifmObj) || !isValidObjId(resMgr, m_fltObj))
+  {
+    return false;
+  }
+  if (m_curF == 0 || m_curW == 0)
+  {
+    std::printf("PIM-Error: Invalid dimensions curF=%u curW=%u in %s\n", m_curF, m_curW, getName().c_str());
+    return false;
+  }
+  const pimObjInfo &objIfm = resMgr->getObjInfo(m_ifmObj);
+  const pimObjInfo &objFlt = resMgr->getObjInfo(m_fltObj);
+  if (!isAssociated(objIfm, objFlt))
+  {
+    return false;
+  }
+  if (objIfm.getDataType() != PIM_INT16 || objFlt.getDataType() != PIM_INT16)
+  {
+    std::printf("PIM-Error: %s requires PIM_INT16 operand objects\n", getName().c_str());
+    return false;
+  }
+  constexpr uint64_t kLanes = 16;
+  const uint64_t expectedElems = static_cast<uint64_t>(m_curF) * static_cast<uint64_t>(m_curW) * kLanes;
+  if (objIfm.getNumElements() != expectedElems || objFlt.getNumElements() != expectedElems)
+  {
+    std::printf("PIM-Error: %s expected %lu elements in IFM/Filter objects, got %lu and %lu\n",
+                getName().c_str(),
+                (unsigned long)expectedElems,
+                (unsigned long)objIfm.getNumElements(),
+                (unsigned long)objFlt.getNumElements());
+    return false;
+  }
+  return true;
+}
+
+//! @brief  PIM CMD: ON-CNN Load Operands - update stats (charges unique H2D bytes only)
+bool pimCmdONCNNLoadOperands::updateStats() const
+{
+  constexpr uint64_t kLanes = 16;
+  constexpr uint64_t kBytesPerElem = sizeof(int16_t); // 2 bytes
+  const uint64_t uniqueBytes = static_cast<uint64_t>(m_curW + m_curF) * kLanes * kBytesPerElem;
+  const uint64_t uniqueBits = uniqueBytes * 8ULL;
+
+  pimeval::perfEnergy mPerfEnergy =
+      pimSim::get()->getPerfEnergyModel()->getPerfEnergyForBytesTransfer(PimCmdEnum::COPY_H2D, uniqueBytes);
+  pimSim::get()->getStatsMgr()->recordCopyMainToDevice(uniqueBits, mPerfEnergy);
+
+  if (m_debugCmds)
+  {
+    std::printf("PIM-Cmd: Broadcast-loaded unique operands (curF=%u, curW=%u, %" PRIu64 " unique bytes) to PIM objs %d, %d\n",
+                m_curF, m_curW, uniqueBytes, m_ifmObj, m_fltObj);
+  }
   return true;
 }
 

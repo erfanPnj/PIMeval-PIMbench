@@ -1409,6 +1409,15 @@ bool pimSim::pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest)
   return m_device->executeCmd(std::move(cmd));
 }
 
+bool pimSim::pimONCNNLoadOperands(PimObjId ifmObj, PimObjId fltObj, const void *ifmUnique, const void *fltUnique, unsigned curF, unsigned curW)
+{
+  pimPerfMon perfMon("pimCopyMainToDevice");
+  if (!isValidDevice())
+    return false;
+  std::unique_ptr<pimCmd> cmd = std::make_unique<pimCmdONCNNLoadOperands>(ifmObj, fltObj, ifmUnique, fltUnique, curF, curW);
+  return m_device->executeCmd(std::move(cmd));
+}
+
 // Explicit template instantiations
 template bool pimSim::pimBroadcast<uint64_t>(PimObjId dest, uint64_t value);
 template bool pimSim::pimBroadcast<int64_t>(PimObjId dest, int64_t value);

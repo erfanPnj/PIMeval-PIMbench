@@ -1,9 +1,10 @@
-stage 0: conv 4d -> (8, 12, 16)  input shift=0 clipped=0 nonzero->0=0
+stage 0: conv 4d -> (8, 12, 16)  input shift=0 clipped=0 nonzero->0=0  chunks=2 calls=24 eq10_cycles=972
 stage 1: relu -> (8, 12, 16)
 stage 2: pool -> (8, 6, 8)
-stage 3: conv 3d -> (16, 6, 8)  input shift=0 clipped=0 nonzero->0=0
+stage 3: conv 3d -> (16, 6, 8)  input shift=0 clipped=0 nonzero->0=0  chunks=5 calls=15 eq10_cycles=648
 stage 4: relu -> (16, 6, 8)
 stage 5: pool -> (16, 3, 4)
-stage 6: conv 4d -> (20, 3, 4)  input shift=4 clipped=0 nonzero->0=0
+stage 6: conv 4d -> (20, 3, 4)  input shift=4 clipped=0 nonzero->0=0  chunks=9 calls=9 eq10_cycles=432
 stage 7: relu -> (20, 3, 4)
-stage 8: conv 3d -> (8, 2, 2)  input shift=5 clipped=0 nonzero->0=0
+stage 8: conv 3d -> (8, 2, 2)  input shift=6 clipped=0 nonzero->0=0  chunks=12 calls=12 eq10_cycles=540
+ref_summary: pack=flat variant=SS total_calls=60 total_eq10_cycles=2592

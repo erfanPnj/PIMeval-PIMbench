@@ -97,6 +97,7 @@ enum class PimCmdEnum
 
   // fused implementation instead of separated ossm, oa tree and ofc units
   ONCNN_MAC,
+  ONCNN_LOAD_OPERANDS,
 
   // BitSIMD v-layout commands
   ROW_R,
@@ -647,6 +648,35 @@ private:
   PimObjId m_src2;
   PimObjId m_dest;
 };
+
+//! @class  pimCmdONCNNLoadOperands
+//! @brief  Pim CMD: Expand unique ON-CNN window/filter 16-lane vectors into per-PE layout
+//!         (pe = filt * curW + win) inside the simulator and charge H2D copy for unique bytes only.
+class pimCmdONCNNLoadOperands : public pimCmd
+{
+public:
+  pimCmdONCNNLoadOperands(PimObjId ifmObj, PimObjId fltObj, const void *ifmUnique, const void *fltUnique, unsigned curF, unsigned curW)
+      : pimCmd(PimCmdEnum::ONCNN_LOAD_OPERANDS),
+        m_ifmObj(ifmObj),
+        m_fltObj(fltObj),
+        m_ifmUnique(ifmUnique),
+        m_fltUnique(fltUnique),
+        m_curF(curF),
+        m_curW(curW) {}
+  virtual ~pimCmdONCNNLoadOperands() {}
+  virtual bool execute() override;
+  virtual bool sanityCheck() const override;
+  virtual bool updateStats() const override;
+
+private:
+  PimObjId m_ifmObj = -1;
+  PimObjId m_fltObj = -1;
+  const void *m_ifmUnique = nullptr;
+  const void *m_fltUnique = nullptr;
+  unsigned m_curF = 0;
+  unsigned m_curW = 0;
+};
+
 
 //! @class  pimCmdReduction
 //! @brief  Pim CMD: Reduction non-ranged/ranged
