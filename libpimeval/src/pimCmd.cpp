@@ -105,8 +105,7 @@ pimCmd::getName(PimCmdEnum cmdType, const std::string &suffix)
       {PimCmdEnum::OFC, "ofc"},
       {PimCmdEnum::OA_REDUCE, "oa_reduce"},
       {PimCmdEnum::ONCNN_MAC, "oncnn_mac"},
-      {PimCmdEnum::ONCNN_LOAD_OPERANDS, "oncnn_load_operands"}
-    };
+      {PimCmdEnum::ONCNN_LOAD_OPERANDS, "oncnn_load_operands"}};
   auto it = cmdNames.find(cmdType);
   return it != cmdNames.end() ? it->second + suffix : "unknown";
 }
@@ -912,10 +911,13 @@ bool pimCmdONCNNLoadOperands::execute()
     const uint64_t activePEs = static_cast<uint64_t>(m_curF) * static_cast<uint64_t>(m_curW);
     const uint64_t totalElems = activePEs * kLanes;
 
+    // A null host pointer means "do not touch this operand" (e.g. filters stay resident while only IFM is reloaded)
+    const bool loadIfm = (m_ifmUnique != nullptr);
+    const bool loadFlt = (m_fltUnique != nullptr);
     const int16_t *ifmU = static_cast<const int16_t *>(m_ifmUnique);
     const int16_t *fltU = static_cast<const int16_t *>(m_fltUnique);
-    std::vector<int16_t> ifmExpanded(totalElems, 0);
-    std::vector<int16_t> fltExpanded(totalElems, 0);
+    std::vector<int16_t> ifmExpanded(loadIfm ? totalElems : 0, 0);
+    std::vector<int16_t> fltExpanded(loadFlt ? totalElems : 0, 0);
 
     // Negative-control hook (ONCNN_BAD_BROADCAST=1): deliberately break the PE mapping
     // (transpose pe = win * curF + filt, or reverse win when curF == 1) so tests must fail.
@@ -932,28 +934,42 @@ bool pimCmdONCNNLoadOperands::execute()
           pe = (m_curF > 1) ? (static_cast<uint64_t>(win) * m_curF + filt)
                             : static_cast<uint64_t>(m_curW - 1 - win);
         }
-        const int16_t *wSrc = ifmU + static_cast<uint64_t>(win) * kLanes;
-        const int16_t *fSrc = fltU + static_cast<uint64_t>(filt) * kLanes;
-        int16_t *wDst = ifmExpanded.data() + pe * kLanes;
-        int16_t *fDst = fltExpanded.data() + pe * kLanes;
         for (unsigned l = 0; l < kLanes; ++l)
         {
-          wDst[l] = wSrc[l];
-          fDst[l] = fSrc[l];
+          if (loadIfm)
+          {
+            ifmExpanded[pe * kLanes + l] = ifmU[static_cast<uint64_t>(win) * kLanes + l];
+          }
+          if (loadFlt)
+          {
+            fltExpanded[pe * kLanes + l] = fltU[static_cast<uint64_t>(filt) * kLanes + l];
+          }
         }
       }
     }
 
-    objIfm.copyFromHost(ifmExpanded.data(), 0, totalElems);
-    objFlt.copyFromHost(fltExpanded.data(), 0, totalElems);
+    if (loadIfm)
+    {
+      objIfm.copyFromHost(ifmExpanded.data(), 0, totalElems);
+    }
+    if (loadFlt)
+    {
+      objFlt.copyFromHost(fltExpanded.data(), 0, totalElems);
+    }
   }
 
   if (pimSim::get()->getDeviceType() != PIM_FUNCTIONAL)
   {
     const pimObjInfo &objIfm = m_device->getResMgr()->getObjInfo(m_ifmObj);
     const pimObjInfo &objFlt = m_device->getResMgr()->getObjInfo(m_fltObj);
-    objIfm.syncToSimulatedMem();
-    objFlt.syncToSimulatedMem();
+    if (m_ifmUnique != nullptr)
+    {
+      objIfm.syncToSimulatedMem();
+    }
+    if (m_fltUnique != nullptr)
+    {
+      objFlt.syncToSimulatedMem();
+    }
   }
 
   updateStats();
@@ -964,9 +980,9 @@ bool pimCmdONCNNLoadOperands::execute()
 bool pimCmdONCNNLoadOperands::sanityCheck() const
 {
   pimResMgr *resMgr = m_device->getResMgr();
-  if (!m_ifmUnique || !m_fltUnique)
+  if (!m_ifmUnique && !m_fltUnique)
   {
-    std::printf("PIM-Error: Invalid null pointer in %s\n", getName().c_str());
+    std::printf("PIM-Error: %s needs at least one non-null operand pointer\n", getName().c_str());
     return false;
   }
   if (!isValidObjId(resMgr, m_ifmObj) || !isValidObjId(resMgr, m_fltObj))
@@ -1008,7 +1024,10 @@ bool pimCmdONCNNLoadOperands::updateStats() const
 {
   constexpr uint64_t kLanes = 16;
   constexpr uint64_t kBytesPerElem = sizeof(int16_t); // 2 bytes
-  const uint64_t uniqueBytes = static_cast<uint64_t>(m_curW + m_curF) * kLanes * kBytesPerElem;
+
+  // Only operands that are really loaded are charged: curW IFM vectors and/or curF filter vectors
+  const uint64_t numUniqueVectors = (m_ifmUnique ? m_curW : 0) + (m_fltUnique ? m_curF : 0);
+  const uint64_t uniqueBytes = numUniqueVectors * kLanes * kBytesPerElem;
   const uint64_t uniqueBits = uniqueBytes * 8ULL;
 
   pimeval::perfEnergy mPerfEnergy =

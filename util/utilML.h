@@ -294,277 +294,614 @@ void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<s
 
 // ===================== ON-CNN dataflow (Shafique & Lee, IEEE Access 2024) =====================
 //
-// Mapping & Modeling Notes (Fulcrum PIM vs. ON-CNN Paper):
-//   1. Dataflow & Broadcast (ONCNN_BROADCAST=1 default, 0 for legacy per-PE H2D):
-//      In ON-CNN (Sec. IV-A/C, Fig. 9), each column of PEs shares the same 16-lane IFM window
-//      vector (C = 16 unique window vectors per run) and each row shares the same 16-lane filter
-//      vector (T*R = 256 unique filter vectors per run). Because Fulcrum has no on-chip buffer
-//      (pimAllocBuffer is AiM-only) or strided D2D broadcast, pimONCNNLoadOperands expands the
-//      curW + curF unique 16-lane vectors into the per-PE layout (pe = filt*curW + win) inside
-//      the simulator and charges H2D copy cost for only the unique bytes: (curW + curF)*16*2.
-//   2. Packing Modes (ONCNN_PACK=flat|pixel, default flat):
-//      - flat:  packs ceil(Cin*Hf*Wf / 16) chunks per PE pass (follows Eq. 9/10 and Table 4).
-//      - pixel: packs 1 kernel pixel per chunk (chPerPix = ceil(Cin/16), numChunks = Hf*Wf*chPerPix),
-//               matching Table 3's 81.25% idle multipliers in VGG-16 conv1-1 (Cin=3).
-//   3. Variants (ONCNN_VARIANT=SS|SP, default SS):
-//      Derives C_SOP from Eq. 7: C_SOP = dM + dA*ceil(log2 M) + 2*Pa + ceil(log2 M).
-//      SS uses dM=3, clk=1.2 ns (C_SOP=47); SP uses dM=2, clk=1.1 ns (C_SOP=46).
-//   4. Intentionally Host-Side or Unmodeled Components:
-//      - Requantization (oncnnRequantize): done on the host per image/layer via a dynamic
-//        percentile-calibrated shift to fit int16_t before loading operands.
-//      - ReLU and MaxPooling: executed outside conv2ONCNN rather than on the paper's on-chip PPU.
-//      - On-chip Input/Output Memories (Fig. 9): modeled as H2D (pimONCNNLoadOperands) and
-//        D2H (pimCopyDeviceToHost) transfers; partial sums stay in each PE's 64-bit accumulator
-//        (PIM_INT64) across chunks.
-//      - Tile/column power gating (Sec. IV-D): saves power in the paper without changing cycles;
-//        pimPerfEnergyFulcrum charges all configured cores without gating discounts.
-//      - Port & Row Access Defaults: Fulcrum walker port width defaults to ONCNN_PORT_BITS=128
-//        (0 = ideal paper port) and DRAM row read/write charging defaults to ONCNN_ROW_ACCESS=1
-//        (0 = pure Eq. 10 compute time).
-constexpr int kOnCnnLanes = 16; // M: multipliers per PE
-constexpr int kOnCnnCols = 16;  // C: IFM windows processed in parallel (paper, Sec. IV-A)
+// HOW THIS CODE MAPS ON-CNN ONTO FULCRUM
+//
+//   The 4096 PEs of ON-CNN (16 tiles x 16 rows x 16 columns) are laid out as ONE flat row of PEs:
+//
+//       gridRows = 256 groups ("PE rows"), each group has gridCols = 16 PEs ("PE columns")
+//
+//       PE number  =  filterRow * 16 + windowColumn
+//
+//       PEs   0..15   -> filter 0 of the block, IFM windows 0..15 of the block
+//       PEs  16..31   -> filter 1 of the block, IFM windows 0..15 of the block
+//       ...
+//       PEs 4080..4095-> filter 255 of the block, IFM windows 0..15 of the block
+//
+//   * All 16 PEs of one group get the SAME filter  (like one row of ON-CNN, Fig. 5 of the paper).
+//   * PE number c of every group gets the SAME IFM window (like one column of ON-CNN).
+//   * The grid is always completely full. PEs that have no real work are IDLE:
+//       - IFM window number >= totalWindows  -> its IFM values are all 0
+//       - filter number >= Cout              -> its filter values are all 0
+//     Idle PEs still run (they multiply by zero), like the paper's PEs that have nothing to do.
+//
+// HOW DATA IS BROUGHT INTO THE SUBARRAYS
+//
+//   Every PE consumes the flattened window (Cin * Hf * Wf values) 16 values at a time.
+//   One piece of 16 values is called a CHUNK; a window needs numChunks = ceil(Cin*Hf*Wf / 16) chunks.
+//
+//   For every chunk number c we allocate two PIM objects that cover the whole PE grid:
+//       ifmObjects[c]     : 4096 PEs x 16 lanes  (the 16 IFM values of chunk c, for every PE)
+//       filterObjects[c]  : 4096 PEs x 16 lanes  (the 16 filter values of chunk c, for every PE)
+//   Each object lives in its own row of the subarrays, so ALL chunks of a tile are stored in the
+//   subarray at the same time (the subarray plays the role of the paper's input memory).
+//   After loading, the only thing left is: for each chunk, pimONCNNMac activates the two rows and
+//   the walkers shift the 16 values through the PE (the walker plays the role of the PISO register).
+//
+//   Loop structure (Algorithm 3):
+//       for each FILTER BLOCK (256 filters):
+//           load the filters of this block into filterObjects[0 .. numChunks-1]   (ONCE per filter block)
+//           for each WINDOW BLOCK (16 windows):
+//               load the IFM values of this block into ifmObjects[0 .. numChunks-1]
+//               zero the accumulators, run numChunks MAC runs, read the accumulators back
+//
+//   Why not preload the IFM data of the WHOLE layer? It does not fit. The IFM data of one window block
+//   needs numChunks rows per core, and a layer has up to thousands of window blocks (VGG16 conv1-2:
+//   3136 blocks x 36 chunks = 112,896 rows per core, more than a 1024-row subarray config offers).
+//   Even with a huge subarray the simulator would have to keep every PIM object in host memory
+//   (about 128 KiB per object for 4096 PEs, so about 14 GB for conv1-2). Filters of one filter block
+//   are small (numChunks rows) and are reused by every window block, so they stay resident.
+//
+//   Rows needed per core at any time = (2 * numChunks + 1) * (rows per object per core).
+//   For the largest VGG16 layer (numChunks = 288) that is 577 rows when a core holds one row of each object.
+//   (PIMeval merges two subarrays into one Fulcrum core, so a core has 2 x num_row_per_subarray rows.)
+//   oncnnCheckCoreCapacity() prints the exact need and stops with a clear message if a core has too few rows.
+//
+// OTHER MODELING NOTES
+//   1. Flat packing (Algorithm 3, Eq. 6, 9, 10, Table 4): the window is flattened as
+//      position = (kernelRow * Wf + kernelCol) * Cin + channel, so one chunk may cross a kernel pixel.
+//   2. Architecture variant (ONCNN_VARIANT=SS|SP, default SS), C_SOP from Eq. 7:
+//        SS: dM = 3, clock 1.2 ns -> C_SOP = 47 (48 cycles per MAC run)
+//        SP: dM = 2, clock 1.1 ns -> C_SOP = 46 (47 cycles per MAC run)
+//   3. Not modeled / done on the host: requantization to int16 (oncnnRequantize), ReLU and pooling
+//      (the paper's PPU), tile/column power gating (idle PEs still consume simulated energy),
+//      and the on-chip broadcast network itself (pimONCNNLoadOperands only charges the unique bytes).
 
-inline long oncnnEnvLong(const char *name, long def)
+constexpr int kOnCnnLanes = 16; // M: number of multipliers per PE
+constexpr int kOnCnnCols = 16;  // C: number of IFM windows processed in parallel
+
+// Read an integer environment variable, or return defaultValue if not set
+inline long oncnnEnvLong(const char *name, long defaultValue)
 {
   const char *s = std::getenv(name);
-  return (s && *s) ? std::atol(s) : def;
+  if (s != nullptr && s[0] != '\0')
+  {
+    return std::atol(s);
+  }
+  return defaultValue;
 }
 
+// Check if ONCNN_VARIANT is set to "SP" (Serial-Parallel). Default is "SS" (Serial-Serial).
 inline bool oncnnIsVariantSP()
 {
   const char *s = std::getenv("ONCNN_VARIANT");
-  return s && (std::string(s) == "SP" || std::string(s) == "sp");
+  if (s == nullptr)
+  {
+    return false;
+  }
+  std::string val(s);
+  return (val == "SP" || val == "sp");
 }
 
-inline bool oncnnIsPackPixel()
+// Number of ON-CNN PEs per PIM core (must match ONCNN_PES_PER_CORE in the perf model, default 4)
+inline int oncnnPEsPerCore()
 {
-  const char *s = std::getenv("ONCNN_PACK");
-  return s && (std::string(s) == "pixel" || std::string(s) == "PIXEL");
+  long val = oncnnEnvLong("ONCNN_PES_PER_CORE", 4);
+  if (val < 1)
+  {
+    val = 1;
+  }
+  return static_cast<int>(val);
 }
 
-inline bool oncnnBroadcastEnabled()
+// Ceiling division: ceil(a / b) for positive integers
+inline uint64_t oncnnCeilDiv(uint64_t a, uint64_t b)
 {
-  return oncnnEnvLong("ONCNN_BROADCAST", 1) != 0;
+  return (a + b - 1) / b;
 }
 
-// Must match ONCNN_PES_PER_CORE used by the perf model (default 4)
-inline int oncnnPEsPerCore() { return (int)std::max(1L, oncnnEnvLong("ONCNN_PES_PER_CORE", 4)); }
-inline uint64_t oncnnCeilDiv(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
-
+// Compute ceil(log2(lanes)) for the adder tree depth (for M = 16 lanes, this returns 4)
 inline uint64_t oncnnTreeLevels(uint64_t lanes = kOnCnnLanes)
 {
   uint64_t lvl = 0;
   for (uint64_t v = 1; v < lanes; v <<= 1)
+  {
     ++lvl;
-  return lvl; // ceil(log2(M)) = 4 for M = 16
+  }
+  return lvl;
 }
 
 // Paper Eq. 7: C_SOP = dM + dA*ceil(log2 M) + 2*Pa + ceil(log2 M)
 inline uint64_t oncnnCsop()
 {
-  const long defDm = oncnnIsVariantSP() ? 2L : 3L;
-  const long dM = std::max(0L, oncnnEnvLong("ONCNN_DELTA_M", defDm));
-  const long dA = std::max(0L, oncnnEnvLong("ONCNN_DELTA_A", 2L));
-  const long Pa = std::max(1L, oncnnEnvLong("ONCNN_PA", 16L));
-  const uint64_t treeLvl = oncnnTreeLevels(kOnCnnLanes);
-  return (uint64_t)dM + (uint64_t)dA * treeLvl + 2ULL * (uint64_t)Pa + treeLvl;
+  long defaultDm = 3; // SS default
+  if (oncnnIsVariantSP())
+  {
+    defaultDm = 2; // SP default
+  }
+
+  long dM = oncnnEnvLong("ONCNN_DELTA_M", defaultDm);
+  if (dM < 0)
+    dM = 0;
+
+  long dA = oncnnEnvLong("ONCNN_DELTA_A", 2);
+  if (dA < 0)
+    dA = 0;
+
+  long Pa = oncnnEnvLong("ONCNN_PA", 16);
+  if (Pa < 1)
+    Pa = 1;
+
+  uint64_t treeLvl = oncnnTreeLevels(kOnCnnLanes);
+  return static_cast<uint64_t>(dM) + static_cast<uint64_t>(dA) * treeLvl + 2ULL * static_cast<uint64_t>(Pa) + treeLvl;
 }
 
+// Return clock period in nanoseconds (1.1 ns for SP, 1.2 ns for SS, or overridden by ONCNN_CLK_NS)
 inline double oncnnClkNs()
 {
-  if (const char *s = std::getenv("ONCNN_CLK_NS"))
-    if (std::atof(s) > 0.0)
-      return std::atof(s);
-  return oncnnIsVariantSP() ? 1.1 : 1.2;
+  const char *s = std::getenv("ONCNN_CLK_NS");
+  if (s != nullptr)
+  {
+    double customClk = std::atof(s);
+    if (customClk > 0.0)
+    {
+      return customClk;
+    }
+  }
+  if (oncnnIsVariantSP())
+  {
+    return 1.1;
+  }
+  return 1.2;
 }
 
-// Number of 16-lane chunks (pimONCNNMac calls) per (filter block, window block) pass
+// Number of 16-lane chunks (pimONCNNMac calls) per (filter block, window block) pass (Eq. 6)
 inline uint64_t oncnnChunksPerPE(uint64_t Cin, uint64_t Hf, uint64_t Wf)
 {
-  if (oncnnIsPackPixel())
-  {
-    const uint64_t chPerPix = oncnnCeilDiv(Cin, kOnCnnLanes);
-    return Hf * Wf * chPerPix;
-  }
   return oncnnCeilDiv(Cin * Hf * Wf, kOnCnnLanes);
 }
 
-// Expected pimONCNNMac call count for a layer under the active ONCNN_PACK mode
+// Expected pimONCNNMac call count for a layer (Eq. 6)
 inline uint64_t oncnnEq10Calls(uint64_t Cout, uint64_t Hout, uint64_t Wout, uint64_t Cin,
                                uint64_t Hf, uint64_t Wf, uint64_t numPEs)
 {
-  const uint64_t cols = std::min<uint64_t>(kOnCnnCols, numPEs);
-  const uint64_t rowsF = std::max<uint64_t>(1, numPEs / cols); // T x R
-  return oncnnCeilDiv(Cout, rowsF) * oncnnCeilDiv(Hout * Wout, cols) *
-         oncnnChunksPerPE(Cin, Hf, Wf);
+  uint64_t cols = std::min<uint64_t>(kOnCnnCols, numPEs);
+  uint64_t rowsF = std::max<uint64_t>(1, numPEs / cols); // T x R
+  uint64_t filterBlocks = oncnnCeilDiv(Cout, rowsF);
+  uint64_t windowBlocks = oncnnCeilDiv(Hout * Wout, cols);
+  return filterBlocks * windowBlocks * oncnnChunksPerPE(Cin, Hf, Wf);
 }
 
-// Paper Eq. 10 cycles for a PE pool of numPEs PEs arranged as (numPEs/C) filters x C windows.
-// In flat mode (default), follows Eq. 9/10 and Table 4 literally:
-//   Comp = ceil(Cout/(T*R)) * ceil(Hout*Wout/C) * ceil((C_SOP+1) * Cin*Hf*Wf / M)
-// In pixel mode (ONCNN_PACK=pixel), each of the Hf*Wf*ceil(Cin/M) chunks runs for (C_SOP+1) cycles.
+// Paper Eq. 10 cycles: Comp = ceil(Cout/(T*R)) * ceil(Hout*Wout/C) * ceil((C_SOP+1) * Cin*Hf*Wf / M)
 inline uint64_t oncnnEq10Cycles(uint64_t Cout, uint64_t Hout, uint64_t Wout, uint64_t Cin,
                                 uint64_t Hf, uint64_t Wf, uint64_t numPEs)
 {
-  const uint64_t cols = std::min<uint64_t>(kOnCnnCols, numPEs);
-  const uint64_t rowsF = std::max<uint64_t>(1, numPEs / cols); // T x R
-  const uint64_t outerPasses = oncnnCeilDiv(Cout, rowsF) * oncnnCeilDiv(Hout * Wout, cols);
-  if (oncnnIsPackPixel())
-  {
-    return outerPasses * (oncnnCsop() + 1) * oncnnChunksPerPE(Cin, Hf, Wf);
-  }
+  uint64_t cols = std::min<uint64_t>(kOnCnnCols, numPEs);
+  uint64_t rowsF = std::max<uint64_t>(1, numPEs / cols); // T x R
+  uint64_t outerPasses = oncnnCeilDiv(Cout, rowsF) * oncnnCeilDiv(Hout * Wout, cols);
   return outerPasses * oncnnCeilDiv((oncnnCsop() + 1) * Cin * Hf * Wf, kOnCnnLanes);
 }
 
-// One pass of the PE grid over one (filter block of curF filters, window block of curW windows).
-// When ONCNN_BROADCAST=1 (default), fillChunk(chunk, ifmUnique, fltUnique) fills curW*16 IFM values
-// and curF*16 filter values, and pimONCNNLoadOperands expands them into the curF*curW PEs inside the
-// simulator while charging H2D copy for only (curW + curF)*16*2 unique bytes.
-// When ONCNN_BROADCAST=0, fillChunk(chunk, ifmVec, fltVec) fills all activePEs*16 values on the host
-// and calls pimCopyHostToDevice twice.
-bool performConvONCNN_Batched(const std::function<void(int, std::vector<int> &, std::vector<int> &)> &fillChunk,
-                              int numChunks, int activePEs, std::vector<int> &outputMatrix,
-                              int curF = 0, int curW = 0)
+// Helper struct so we can read either a 3D kernel [Cout][Hf][Wf] (shared across channels)
+// or a 4D kernel [Cout][Cin][Hf][Wf] without using C++ lambdas.
+struct OncnnKernelAccessor
 {
-  if (curF <= 0 || curW <= 0)
-  {
-    curF = activePEs;
-    curW = 1;
-  }
-  const int vectorLength = activePEs * kOnCnnLanes; // one 16-lane group per PE
-  outputMatrix.assign(activePEs, 0);
+  const std::vector<std::vector<std::vector<int>>> *kernel3D = nullptr;
+  const std::vector<std::vector<std::vector<std::vector<int>>>> *kernel4D = nullptr;
+  bool is4D = false;
+};
 
-  // 1. Allocate 16-bit IFM and Filter objects (Pa = 16 bits, Paper Sec. IV-B)
-  PimObjId ifmObject = pimAlloc(PIM_ALLOC_AUTO, vectorLength, PIM_INT16);
-  if (ifmObject == -1)
+// Simple function to fetch a weight value from either the 4D or 3D kernel matrix
+inline int oncnnGetWeight(const OncnnKernelAccessor &kernel, int filt, int ch, int kr, int kc)
+{
+  if (kernel.is4D)
   {
-    std::cout << "Function: " << __func__ << " Abort: pimAlloc failed" << std::endl;
+    return (*kernel.kernel4D)[filt][ch][kr][kc];
+  }
+  else
+  {
+    // In 3D kernel mode, the same 2D filter is shared across all input channels
+    return (*kernel.kernel3D)[filt][kr][kc];
+  }
+}
+
+// Check if an int fits in 16 bits (-32768..32767) and cast to int16_t
+inline int16_t oncnnCheckAndCastToInt16(int v, const char *what)
+{
+  if (v < INT16_MIN || v > INT16_MAX)
+  {
+    std::cout << "ON-CNN: " << what << " value " << v << " does not fit in 16 bits" << std::endl;
+    std::exit(1);
+  }
+  return static_cast<int16_t>(v);
+}
+
+// Print "[DATA_COPY]" lines when ONCNN_LOG_DETAILS=1
+inline bool oncnnLogDetailsEnabled()
+{
+  return oncnnEnvLong("ONCNN_LOG_DETAILS", 0) > 0;
+}
+
+// Everything we need to know about one convolution layer and the PE grid, computed once per layer
+struct OncnnLayerPlan
+{
+  // Input feature map: inputDepth x inputHeight x inputWidth
+  int inputDepth = 0; // Cin
+  int inputHeight = 0;
+  int inputWidth = 0;
+
+  // Filters: kernelDepth x Cin x kernelHeight x kernelWidth
+  int kernelDepth = 0; // Cout = number of filters
+  int kernelHeight = 0;
+  int kernelWidth = 0;
+
+  int stride = 1;
+  int padding = 0;
+
+  // Output feature map: one output pixel per (filter, window)
+  int outputHeight = 0;
+  int outputWidth = 0;
+  int totalWindows = 0; // outputHeight * outputWidth
+
+  // The flattened window has windowLength = Cin * Hf * Wf values, consumed 16 per chunk
+  int windowLength = 0;
+  int numChunks = 0; // ceil(windowLength / 16)
+
+  // The PE grid: gridRows filters in parallel, gridCols windows in parallel
+  int gridRows = 0; // 256 for 4096 PEs
+  int gridCols = 0; // 16
+  int gridPEs = 0;  // gridRows * gridCols
+
+  int numFilterBlocks = 0; // ceil(Cout / gridRows)
+  int numWindowBlocks = 0; // ceil(totalWindows / gridCols)
+};
+
+// Fill in an OncnnLayerPlan. totalPEs is the number of PEs we are allowed to use (e.g. 4096).
+inline OncnnLayerPlan oncnnMakeLayerPlan(const std::vector<std::vector<std::vector<int>>> &inputMatrix,
+                                         int kernelDepth, int kernelHeight, int kernelWidth,
+                                         int stride, int padding, uint64_t totalPEs)
+{
+  OncnnLayerPlan plan;
+  plan.inputDepth = (int)inputMatrix.size();
+  plan.inputHeight = (int)inputMatrix[0].size();
+  plan.inputWidth = (int)inputMatrix[0][0].size();
+  plan.kernelDepth = kernelDepth;
+  plan.kernelHeight = kernelHeight;
+  plan.kernelWidth = kernelWidth;
+  plan.stride = stride;
+  plan.padding = padding;
+
+  plan.outputHeight = (plan.inputHeight + 2 * padding - kernelHeight) / stride + 1;
+  plan.outputWidth = (plan.inputWidth + 2 * padding - kernelWidth) / stride + 1;
+  plan.totalWindows = plan.outputHeight * plan.outputWidth;
+
+  plan.windowLength = plan.inputDepth * kernelHeight * kernelWidth;
+  plan.numChunks = (int)oncnnChunksPerPE(plan.inputDepth, kernelHeight, kernelWidth);
+
+  plan.gridCols = (int)std::min<uint64_t>(kOnCnnCols, totalPEs);
+  plan.gridRows = (int)std::max<uint64_t>(1, totalPEs / plan.gridCols);
+  plan.gridPEs = plan.gridRows * plan.gridCols;
+
+  plan.numFilterBlocks = (int)oncnnCeilDiv(kernelDepth, plan.gridRows);
+  plan.numWindowBlocks = (int)oncnnCeilDiv(plan.totalWindows, plan.gridCols);
+  return plan;
+}
+
+// Which (channel, kernelRow, kernelCol) is multiplier lane `lane` of chunk number `chunk` working on?
+// The window is flattened as  flatIndex = pixel * Cin + channel  with  pixel = kernelRow * Wf + kernelCol
+// and then cut into pieces of 16 values.
+// Returns false when this lane is behind the end of the window (an idle multiplier).
+inline bool oncnnLaneToWindowPosition(const OncnnLayerPlan &plan, int chunk, int lane,
+                                      int &channel, int &kernelRow, int &kernelCol)
+{
+  const int flatIndex = chunk * kOnCnnLanes + lane;
+  if (flatIndex >= plan.windowLength)
+  {
     return false;
   }
-  PimObjId filterObject = pimAllocAssociated(ifmObject, PIM_INT16);
+  const int pixel = flatIndex / plan.inputDepth;
+  channel = flatIndex % plan.inputDepth;
+  kernelRow = pixel / plan.kernelWidth;
+  kernelCol = pixel % plan.kernelWidth;
+  return true;
+}
 
-  // 2. Allocate Grouped Accumulator as PIM_INT64 (64-bit accumulator register per PE, Paper Sec. II / Fig. 6-7)
-  PimObjId accObject = pimAllocAssociatedGrouped(ifmObject, PIM_INT64, kOnCnnLanes);
-  if (filterObject == -1 || accObject == -1)
+// Build the IFM values of ONE chunk for ONE window block.
+// Result: gridCols vectors of 16 values (one vector per PE column), stored one after the other:
+//   ifmVectors[windowColumn * 16 + lane]
+// Windows that do not exist (the last window block may be partly empty) and lanes behind the end of
+// the window stay 0, and so do values that fall into the zero padding of the image.
+inline void oncnnBuildIfmChunk(const OncnnLayerPlan &plan,
+                               const std::vector<std::vector<std::vector<int>>> &inputMatrix,
+                               int windowBlock, int chunk, std::vector<int16_t> &ifmVectors)
+{
+  std::fill(ifmVectors.begin(), ifmVectors.end(), 0);
+
+  for (int windowColumn = 0; windowColumn < plan.gridCols; ++windowColumn)
   {
-    std::cout << "Function: " << __func__ << " Abort: associated allocation failed" << std::endl;
-    if (filterObject != -1)
-      pimFree(filterObject);
-    if (accObject != -1)
-      pimFree(accObject);
-    pimFree(ifmObject);
+    const int windowIndex = windowBlock * plan.gridCols + windowColumn;
+    if (windowIndex >= plan.totalWindows)
+    {
+      break; // idle PE column: its IFM values stay 0
+    }
+    const int outputRow = windowIndex / plan.outputWidth;
+    const int outputCol = windowIndex % plan.outputWidth;
+
+    for (int lane = 0; lane < kOnCnnLanes; ++lane)
+    {
+      int channel = 0;
+      int kernelRow = 0;
+      int kernelCol = 0;
+      if (!oncnnLaneToWindowPosition(plan, chunk, lane, channel, kernelRow, kernelCol))
+      {
+        break; // the remaining lanes are behind the end of the window
+      }
+      const int inputRow = outputRow * plan.stride + kernelRow - plan.padding;
+      const int inputCol = outputCol * plan.stride + kernelCol - plan.padding;
+      if (inputRow >= 0 && inputRow < plan.inputHeight && inputCol >= 0 && inputCol < plan.inputWidth)
+      {
+        ifmVectors[windowColumn * kOnCnnLanes + lane] =
+            oncnnCheckAndCastToInt16(inputMatrix[channel][inputRow][inputCol], "activation");
+      }
+    }
+  }
+}
+
+// Build the filter values of ONE chunk for ONE filter block.
+// Result: gridRows vectors of 16 values (one vector per PE row = per group of 16 PEs):
+//   filterVectors[filterRow * 16 + lane]
+// Filter rows that do not exist (the last filter block may have fewer than gridRows filters) stay 0.
+inline void oncnnBuildFilterChunk(const OncnnLayerPlan &plan, const OncnnKernelAccessor &kernel,
+                                  int filterBlock, int chunk, std::vector<int16_t> &filterVectors)
+{
+  std::fill(filterVectors.begin(), filterVectors.end(), 0);
+
+  for (int filterRow = 0; filterRow < plan.gridRows; ++filterRow)
+  {
+    const int filterIndex = filterBlock * plan.gridRows + filterRow;
+    if (filterIndex >= plan.kernelDepth)
+    {
+      break; // idle PE row: its filter values stay 0
+    }
+    for (int lane = 0; lane < kOnCnnLanes; ++lane)
+    {
+      int channel = 0;
+      int kernelRow = 0;
+      int kernelCol = 0;
+      if (!oncnnLaneToWindowPosition(plan, chunk, lane, channel, kernelRow, kernelCol))
+      {
+        break;
+      }
+      filterVectors[filterRow * kOnCnnLanes + lane] =
+          oncnnCheckAndCastToInt16(oncnnGetWeight(kernel, filterIndex, channel, kernelRow, kernelCol), "weight");
+    }
+  }
+}
+
+// Make sure the cores have enough rows to keep all chunks of one tile resident.
+// One operand object holds gridPEs * 16 int16 values. Fulcrum stores it as regions of one row each,
+// spread over all cores. We need numChunks IFM objects + numChunks filter objects + 1 accumulator object.
+// Note: PIMeval merges two subarrays into one Fulcrum core, so a core has 2 x num_row_per_subarray rows
+// (deviceProp.numRowPerCore).
+inline void oncnnCheckCoreCapacity(const OncnnLayerPlan &plan, const PimDeviceProperties &deviceProp)
+{
+  const uint64_t bitsPerObject = (uint64_t)plan.gridPEs * kOnCnnLanes * 16;
+  const uint64_t regionsPerObject = oncnnCeilDiv(bitsPerObject, deviceProp.numColPerSubarray);
+  const uint64_t rowsPerObjectPerCore = oncnnCeilDiv(regionsPerObject, deviceProp.numPIMCores);
+  const uint64_t objectsNeeded = 2ULL * plan.numChunks + 1ULL;
+  const uint64_t rowsNeeded = objectsNeeded * rowsPerObjectPerCore;
+
+  if (oncnnLogDetailsEnabled())
+  {
+    std::printf("[ON-CNN] resident rows per core: %lu needed (%lu objects x %lu rows), %u available\n",
+                (unsigned long)rowsNeeded, (unsigned long)objectsNeeded,
+                (unsigned long)rowsPerObjectPerCore, deviceProp.numRowPerCore);
+  }
+  if (rowsNeeded > deviceProp.numRowPerCore)
+  {
+    std::cout << "ON-CNN Abort: this layer needs " << rowsNeeded << " rows per core ("
+              << plan.numChunks << " chunks x 2 operands + accumulator, " << rowsPerObjectPerCore
+              << " row(s) per object per core) but a core has only " << deviceProp.numRowPerCore
+              << " rows. Increase num_row_per_subarray in the PIMeval .cfg file." << std::endl;
+    std::exit(1);
+  }
+}
+
+// Free every PIM object that was allocated for the layer (objects that are -1 are skipped)
+inline void oncnnFreeLayerObjects(std::vector<PimObjId> &ifmObjects, std::vector<PimObjId> &filterObjects,
+                                  PimObjId &accObject)
+{
+  for (size_t i = 0; i < ifmObjects.size(); ++i)
+  {
+    if (ifmObjects[i] != -1)
+    {
+      pimFree(ifmObjects[i]);
+      ifmObjects[i] = -1;
+    }
+  }
+  for (size_t i = 0; i < filterObjects.size(); ++i)
+  {
+    if (filterObjects[i] != -1)
+    {
+      pimFree(filterObjects[i]);
+      filterObjects[i] = -1;
+    }
+  }
+  if (accObject != -1)
+  {
+    pimFree(accObject);
+    accObject = -1;
+  }
+}
+
+// Allocate the PIM objects of one layer:
+//   ifmObjects[chunk], filterObjects[chunk] : gridPEs * 16 int16 values each
+//   accObject                               : one int64 accumulator per PE (one per group of 16 lanes)
+// ifmObjects[0] is the "anchor": all other objects are allocated associated with it, so every object
+// has the same layout and lives in the same cores.
+inline bool oncnnAllocateLayerObjects(const OncnnLayerPlan &plan, std::vector<PimObjId> &ifmObjects,
+                                      std::vector<PimObjId> &filterObjects, PimObjId &accObject)
+{
+  const uint64_t elementsPerObject = (uint64_t)plan.gridPEs * kOnCnnLanes;
+  ifmObjects.assign(plan.numChunks, -1);
+  filterObjects.assign(plan.numChunks, -1);
+  accObject = -1;
+
+  ifmObjects[0] = pimAlloc(PIM_ALLOC_AUTO, elementsPerObject, PIM_INT16);
+  if (ifmObjects[0] == -1)
+  {
+    std::cout << "ON-CNN Abort: pimAlloc failed for the IFM object of chunk 0" << std::endl;
+    return false;
+  }
+  for (int chunk = 1; chunk < plan.numChunks; ++chunk)
+  {
+    ifmObjects[chunk] = pimAllocAssociated(ifmObjects[0], PIM_INT16);
+    if (ifmObjects[chunk] == -1)
+    {
+      std::cout << "ON-CNN Abort: out of PIM memory while allocating the IFM object of chunk " << chunk << std::endl;
+      oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+      return false;
+    }
+  }
+  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
+  {
+    filterObjects[chunk] = pimAllocAssociated(ifmObjects[0], PIM_INT16);
+    if (filterObjects[chunk] == -1)
+    {
+      std::cout << "ON-CNN Abort: out of PIM memory while allocating the filter object of chunk " << chunk << std::endl;
+      oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+      return false;
+    }
+  }
+  accObject = pimAllocAssociatedGrouped(ifmObjects[0], PIM_INT64, kOnCnnLanes);
+  if (accObject == -1)
+  {
+    std::cout << "ON-CNN Abort: could not allocate the accumulator object" << std::endl;
+    oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+    return false;
+  }
+  return true;
+}
+
+// Load the filters of one filter block into filterObjects (all chunks).
+// Done once per filter block: the filters stay in the subarray while all window blocks stream through.
+inline bool oncnnLoadFilterBlock(const OncnnLayerPlan &plan, const OncnnKernelAccessor &kernel, int filterBlock,
+                                 const std::vector<PimObjId> &ifmObjects, const std::vector<PimObjId> &filterObjects)
+{
+  std::vector<int16_t> filterVectors(plan.gridRows * kOnCnnLanes, 0);
+  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
+  {
+    oncnnBuildFilterChunk(plan, kernel, filterBlock, chunk, filterVectors);
+    if (oncnnLogDetailsEnabled())
+    {
+      std::printf("[DATA_COPY] H2D Filters (filter block %d, chunk %d): %zu bytes\n", filterBlock, chunk,
+                  filterVectors.size() * sizeof(int16_t));
+    }
+    // nullptr = do not touch the IFM object. Each of the gridRows filter vectors is expanded to the 16 PEs of its group.
+    PimStatus status = pimONCNNLoadOperands(ifmObjects[chunk], filterObjects[chunk], nullptr, filterVectors.data(),
+                                            (unsigned)plan.gridRows, (unsigned)plan.gridCols);
+    if (status != PIM_OK)
+    {
+      std::cout << "ON-CNN Abort: loading filters failed (filter block " << filterBlock << ", chunk " << chunk << ")" << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+// Load the IFM windows of one window block into ifmObjects (all chunks).
+inline bool oncnnLoadWindowBlock(const OncnnLayerPlan &plan,
+                                 const std::vector<std::vector<std::vector<int>>> &inputMatrix, int windowBlock,
+                                 const std::vector<PimObjId> &ifmObjects, const std::vector<PimObjId> &filterObjects)
+{
+  std::vector<int16_t> ifmVectors(plan.gridCols * kOnCnnLanes, 0);
+  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
+  {
+    oncnnBuildIfmChunk(plan, inputMatrix, windowBlock, chunk, ifmVectors);
+    if (oncnnLogDetailsEnabled())
+    {
+      std::printf("[DATA_COPY] H2D IFM (window block %d, chunk %d): %zu bytes\n", windowBlock, chunk,
+                  ifmVectors.size() * sizeof(int16_t));
+    }
+    // nullptr = do not touch the filter object. Each of the gridCols window vectors is expanded to its PE column in every group.
+    PimStatus status = pimONCNNLoadOperands(ifmObjects[chunk], filterObjects[chunk], ifmVectors.data(), nullptr,
+                                            (unsigned)plan.gridRows, (unsigned)plan.gridCols);
+    if (status != PIM_OK)
+    {
+      std::cout << "ON-CNN Abort: loading IFM failed (window block " << windowBlock << ", chunk " << chunk << ")" << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
+// Run one tile (= one filter block x one window block) on the PE grid.
+// The operands of this tile are already resident in the subarrays.
+inline bool oncnnRunOneTile(const OncnnLayerPlan &plan, int filterBlock, int windowBlock,
+                            const std::vector<PimObjId> &ifmObjects, const std::vector<PimObjId> &filterObjects,
+                            PimObjId accObject, std::vector<std::vector<std::vector<int>>> &resultMatrix,
+                            size_t &overflowCount, int64_t &worstOverflowValue)
+{
+  const int firstFilter = filterBlock * plan.gridRows;
+  const int filtersInBlock = std::min(plan.gridRows, plan.kernelDepth - firstFilter);
+  const int firstWindow = windowBlock * plan.gridCols;
+  const int windowsInBlock = std::min(plan.gridCols, plan.totalWindows - firstWindow);
+
+  // The PE rows that hold real filters are always the first filtersInBlock groups, i.e. PEs
+  // 0 .. busyPEs-1. We only reset and read back these accumulators (idle rows only multiply by zero).
+  const int busyPEs = filtersInBlock * plan.gridCols;
+
+  // 1. Reset the accumulators
+  std::vector<int64_t> zeros(busyPEs, 0);
+  if (oncnnLogDetailsEnabled())
+  {
+    std::printf("[DATA_COPY] H2D Zero-Init Acc: %zu bytes\n", zeros.size() * sizeof(int64_t));
+  }
+  if (pimCopyHostToDevice(zeros.data(), accObject, 0, busyPEs) != PIM_OK)
+  {
+    std::cout << "ON-CNN Abort: resetting the accumulators failed" << std::endl;
     return false;
   }
 
-  const bool useBroadcast = oncnnBroadcastEnabled();
-  const int ifmLen = useBroadcast ? (curW * kOnCnnLanes) : vectorLength;
-  const int fltLen = useBroadcast ? (curF * kOnCnnLanes) : vectorLength;
-
-  std::vector<int> ifmVec(ifmLen), fltVec(fltLen);
-  // Host buffers for PIM_INT16 MUST be int16_t (2 bytes per element)
-  std::vector<int16_t> ifmVec16(ifmLen), fltVec16(fltLen);
-  std::vector<int64_t> zeroInit64(activePEs, 0);
-
-  const char *logEnv = std::getenv("ONCNN_LOG_DETAILS");
-  const bool logDetails = (logEnv && std::atoi(logEnv) > 0);
-  if (logDetails)
+  // 2. One MAC run per chunk: every PE multiplies its 16 IFM values with its 16 filter values,
+  //    adds the 16 products and adds the sum to its accumulator
+  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
   {
-    std::printf("[DATA_COPY] H2D Zero-Init Acc: %zu bytes\n", activePEs * sizeof(int64_t));
+    if (pimONCNNMac(ifmObjects[chunk], filterObjects[chunk], accObject) != PIM_OK)
+    {
+      std::cout << "ON-CNN Abort: pimONCNNMac failed (chunk " << chunk << ")" << std::endl;
+      return false;
+    }
   }
 
-  pimCopyHostToDevice((void *)zeroInit64.data(), accObject);
-
-  auto to16 = [](int v, const char *what) -> int16_t
+  // 3. Read the accumulators back
+  std::vector<int64_t> accumulators(busyPEs, 0);
+  if (oncnnLogDetailsEnabled())
   {
-    if (v < INT16_MIN || v > INT16_MAX)
-    {
-      std::cout << "ON-CNN: " << what << " value " << v << " does not fit in 16 bits" << std::endl;
-      std::exit(1);
-    }
-    return static_cast<int16_t>(v);
-  };
-
-  // Algorithm 3 innermost loop: numChunks runs per PE
-  for (int chunk = 0; chunk < numChunks; ++chunk)
+    std::printf("[DATA_COPY] D2H Read Acc: %zu bytes\n", accumulators.size() * sizeof(int64_t));
+  }
+  if (pimCopyDeviceToHost(accObject, accumulators.data(), 0, busyPEs) != PIM_OK)
   {
-    fillChunk(chunk, ifmVec, fltVec);
-    for (int i = 0; i < ifmLen; ++i)
-      ifmVec16[i] = to16(ifmVec[i], "activation");
-    for (int i = 0; i < fltLen; ++i)
-      fltVec16[i] = to16(fltVec[i], "weight");
+    std::cout << "ON-CNN Abort: reading the accumulators failed" << std::endl;
+    return false;
+  }
 
-    if (useBroadcast)
+  // 4. Copy the real results (not the idle PEs) into the result matrix
+  for (int filterRow = 0; filterRow < filtersInBlock; ++filterRow)
+  {
+    for (int windowColumn = 0; windowColumn < windowsInBlock; ++windowColumn)
     {
-      if (logDetails)
+      const int pe = filterRow * plan.gridCols + windowColumn;
+      const int64_t value = accumulators[pe];
+      if (value < INT32_MIN || value > INT32_MAX)
       {
-        const size_t uniqueBytes = (size_t)(curW + curF) * kOnCnnLanes * sizeof(int16_t);
-        std::printf("[DATA_COPY] H2D Unique Operands: %zu bytes (curF=%d, curW=%d)\n",
-                    uniqueBytes, curF, curW);
+        ++overflowCount;
+        worstOverflowValue = value;
       }
-      if (pimONCNNLoadOperands(ifmObject, filterObject, ifmVec16.data(), fltVec16.data(),
-                               (unsigned)curF, (unsigned)curW) != PIM_OK)
-      {
-        std::cout << "Function: " << __func__ << " Abort: pimONCNNLoadOperands failed" << std::endl;
-        pimFree(accObject);
-        pimFree(filterObject);
-        pimFree(ifmObject);
-        return false;
-      }
-    }
-    else
-    {
-      if (logDetails)
-      {
-        const size_t fullBytes = 2 * (size_t)vectorLength * sizeof(int16_t);
-        std::printf("[DATA_COPY] H2D Per-PE Operands: %zu bytes (activePEs=%d)\n",
-                    fullBytes, activePEs);
-      }
-      pimCopyHostToDevice((void *)ifmVec16.data(), ifmObject);
-      pimCopyHostToDevice((void *)fltVec16.data(), filterObject);
-    }
-    pimONCNNMac(ifmObject, filterObject, accObject);
-  }
-
-  // Copy 64-bit accumulated results back to host, verify int32 range before casting to int
-  std::vector<int64_t> accOut64(activePEs, 0);
-
-  if (logDetails)
-  {
-    std::printf("[DATA_COPY] D2H Read Acc: %zu bytes\n", activePEs * sizeof(int64_t));
-  }
-
-  pimCopyDeviceToHost(accObject, (void *)accOut64.data());
-
-  size_t overflowCount = 0;
-  int64_t worstVal = 0;
-  for (int pe = 0; pe < activePEs; ++pe)
-  {
-    const int64_t v64 = accOut64[pe];
-    if (v64 < INT32_MIN || v64 > INT32_MAX)
-    {
-      ++overflowCount;
-      worstVal = v64;
-    }
-    outputMatrix[pe] = static_cast<int>(v64);
-  }
-  if (overflowCount > 0)
-  {
-    const bool strict = oncnnEnvLong("ONCNN_STRICT", 0) != 0;
-    std::cout << "ON-CNN: int32 accumulator overflow count=" << overflowCount
-              << " / " << activePEs << " PEs (sample=" << worstVal << ")" << std::endl;
-    if (strict)
-    {
-      std::cout << "ON-CNN Abort: accumulator overflowed int32 with ONCNN_STRICT=1" << std::endl;
-      pimFree(accObject);
-      pimFree(filterObject);
-      pimFree(ifmObject);
-      std::exit(1);
+      const int filterIndex = firstFilter + filterRow;
+      const int windowIndex = firstWindow + windowColumn;
+      resultMatrix[filterIndex][windowIndex / plan.outputWidth][windowIndex % plan.outputWidth] = static_cast<int>(value);
     }
   }
-
-  pimFree(accObject);
-  pimFree(filterObject);
-  pimFree(ifmObject);
   return true;
 }
 
@@ -599,8 +936,13 @@ inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
         {
           const int64_t a = v < 0 ? -(int64_t)v : v;
           int64_t q = (a + half) >> shift; // round to nearest
-          if (q > INT16_MAX) { q = INT16_MAX; ++clipped; } // saturate
-          if (a != 0 && q == 0) ++zeroed;
+          if (q > INT16_MAX)
+          {
+            q = INT16_MAX;
+            ++clipped;
+          } // saturate
+          if (a != 0 && q == 0)
+            ++zeroed;
           v = (int)(v < 0 ? -q : q);
         }
     if (std::getenv("ONCNN_VERBOSE"))
@@ -610,10 +952,11 @@ inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
   return shift;
 }
 
-// Core ON-CNN convolution. weightAt(f, c, r, s) returns weight of filter f, channel c, row r, col s.
+// Core ON-CNN convolution (Algorithm 3 / Eq. 6 / Eq. 10).
+// Steps: requantize -> make the layer plan -> allocate PIM objects -> filter blocks -> window blocks -> tiles.
 void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
                 int kernelDepth, int kernelHeight, int kernelWidth,
-                const std::function<int(int, int, int, int)> &weightAt,
+                const OncnnKernelAccessor &kernelAccessor,
                 std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
 {
   std::vector<std::vector<std::vector<int>>> inputMatrix = inputMatrixIn; // local copy
@@ -634,164 +977,113 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
     exit(1);
   }
 
-  const int inputDepth = inputMatrix.size(); // Cin
-  const int inputHeight = inputMatrix[0].size();
-  const int inputWidth = inputMatrix[0][0].size();
-  const int outMatRow = (inputHeight + 2 * padding - kernelHeight) / stride + 1;
-  const int outMatCol = (inputWidth + 2 * padding - kernelWidth) / stride + 1;
-  const int totalWindows = outMatRow * outMatCol;        // H_out * W_out
-  const int K = inputDepth * kernelHeight * kernelWidth; // flattened reduction length
-  const bool packPixel = oncnnIsPackPixel();
-  const int chPerPix = (inputDepth + kOnCnnLanes - 1) / kOnCnnLanes;
-  const int numChunks = (int)oncnnChunksPerPE(inputDepth, kernelHeight, kernelWidth);
-  const bool useBroadcast = oncnnBroadcastEnabled();
-
-  resultMatrix.assign(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
-
-  // Allow fixing total PEs (e.g. ONCNN_TOTAL_PES=4096) on a fixed memory config
+  // How many PEs do we use? Allow fixing the total (e.g. ONCNN_TOTAL_PES=4096) on a fixed memory config.
   const uint64_t maxHardwarePEs = (uint64_t)deviceProp.numPIMCores * oncnnPEsPerCore();
   const uint64_t targetPEs = (uint64_t)oncnnEnvLong("ONCNN_TOTAL_PES", maxHardwarePEs);
   const uint64_t numPEs = std::min(maxHardwarePEs, targetPEs);
 
-  const int cols = (int)std::min<uint64_t>(kOnCnnCols, numPEs); // C
-  const int rowsF = (int)std::max<uint64_t>(1, numPEs / cols);  // T x R
+  const OncnnLayerPlan plan = oncnnMakeLayerPlan(inputMatrix, kernelDepth, kernelHeight, kernelWidth,
+                                                 stride, padding, numPEs);
 
-  // Algorithm 3 / Eq. 6 loops: filter blocks (T*R), window blocks (C), chunks (M=16)
-  for (int f0 = 0; f0 < kernelDepth; f0 += rowsF)
+  resultMatrix.assign(plan.kernelDepth,
+                      std::vector<std::vector<int>>(plan.outputHeight, std::vector<int>(plan.outputWidth, 0)));
+
+  oncnnCheckCoreCapacity(plan, deviceProp);
+
+  std::vector<PimObjId> ifmObjects;
+  std::vector<PimObjId> filterObjects;
+  PimObjId accObject = -1;
+  if (!oncnnAllocateLayerObjects(plan, ifmObjects, filterObjects, accObject))
   {
-    const int curF = std::min(rowsF, kernelDepth - f0);
-    for (int w0 = 0; w0 < totalWindows; w0 += cols)
+    return;
+  }
+
+  size_t overflowCount = 0;
+  int64_t worstOverflowValue = 0;
+
+  // Algorithm 3 / Eq. 6 loops: filter blocks (T*R filters) -> window blocks (C windows) -> chunks (M = 16)
+  for (int filterBlock = 0; filterBlock < plan.numFilterBlocks; ++filterBlock)
+  {
+    if (!oncnnLoadFilterBlock(plan, kernelAccessor, filterBlock, ifmObjects, filterObjects))
     {
-      const int curW = std::min(cols, totalWindows - w0);
-      const int activePEs = curF * curW; // PE index = filter * curW + window
-
-      auto fill = [&](int chunk, std::vector<int> &ifm, std::vector<int> &flt)
+      oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+      return;
+    }
+    for (int windowBlock = 0; windowBlock < plan.numWindowBlocks; ++windowBlock)
+    {
+      if (!oncnnLoadWindowBlock(plan, inputMatrix, windowBlock, ifmObjects, filterObjects) ||
+          !oncnnRunOneTile(plan, filterBlock, windowBlock, ifmObjects, filterObjects, accObject,
+                           resultMatrix, overflowCount, worstOverflowValue))
       {
-        int laneCh[kOnCnnLanes], laneKr[kOnCnnLanes], laneKc[kOnCnnLanes];
-        int validLanes = 0;
-        if (packPixel)
-        {
-          // pixel mode: one kernel pixel per chunk, 16 channels per chunk (Table 3 reading)
-          const int pix = chunk / chPerPix;
-          const int chBlk = chunk % chPerPix;
-          const int kr = pix / kernelWidth;
-          const int kc = pix % kernelWidth;
-          for (int l = 0; l < kOnCnnLanes; ++l)
-          {
-            const int ch = chBlk * kOnCnnLanes + l;
-            if (ch >= inputDepth)
-              break;
-            laneCh[l] = ch;
-            laneKr[l] = kr;
-            laneKc[l] = kc;
-            ++validLanes;
-          }
-        }
-        else
-        {
-          // flat mode (default): kk = pix * Cin + ch across Cin * Hf * Wf (Eq. 9/10, Table 4)
-          for (int l = 0; l < kOnCnnLanes; ++l)
-          {
-            const int kk = chunk * kOnCnnLanes + l;
-            if (kk >= K)
-              break;
-            const int pix = kk / inputDepth;
-            laneCh[l] = kk % inputDepth;
-            laneKr[l] = pix / kernelWidth;
-            laneKc[l] = pix % kernelWidth;
-            ++validLanes;
-          }
-        }
-
-        std::fill(ifm.begin(), ifm.end(), 0); // unused lanes stay zero (idle multipliers)
-        std::fill(flt.begin(), flt.end(), 0);
-
-        if (useBroadcast)
-        {
-          // Build only curW unique 16-lane IFM vectors and curF unique 16-lane filter vectors
-          for (int w = 0; w < curW; ++w)
-          {
-            const int win = w0 + w;
-            const int oh = win / outMatCol, ow = win % outMatCol;
-            for (int l = 0; l < validLanes; ++l)
-            {
-              const int ih = oh * stride + laneKr[l] - padding;
-              const int iw = ow * stride + laneKc[l] - padding;
-              if (ih >= 0 && ih < inputHeight && iw >= 0 && iw < inputWidth)
-                ifm[w * kOnCnnLanes + l] = inputMatrix[laneCh[l]][ih][iw];
-            }
-          }
-          for (int f = 0; f < curF; ++f)
-          {
-            const int filt = f0 + f;
-            for (int l = 0; l < validLanes; ++l)
-            {
-              flt[f * kOnCnnLanes + l] = weightAt(filt, laneCh[l], laneKr[l], laneKc[l]);
-            }
-          }
-        }
-        else
-        {
-          // Legacy path (ONCNN_BROADCAST=0): build full per-PE vectors on host
-          for (int pe = 0; pe < activePEs; ++pe)
-          {
-            const int filt = f0 + pe / curW;
-            const int win = w0 + pe % curW;
-            const int oh = win / outMatCol, ow = win % outMatCol;
-            for (int l = 0; l < validLanes; ++l)
-            {
-              const int idx = pe * kOnCnnLanes + l;
-              const int ih = oh * stride + laneKr[l] - padding;
-              const int iw = ow * stride + laneKc[l] - padding;
-              flt[idx] = weightAt(filt, laneCh[l], laneKr[l], laneKc[l]);
-              if (ih >= 0 && ih < inputHeight && iw >= 0 && iw < inputWidth)
-                ifm[idx] = inputMatrix[laneCh[l]][ih][iw];
-            }
-          }
-        }
-      };
-
-      std::vector<int> outVector;
-      if (!performConvONCNN_Batched(fill, numChunks, activePEs, outVector, curF, curW))
+        oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
         return;
-
-      for (int pe = 0; pe < activePEs; ++pe)
-      {
-        const int filt = f0 + pe / curW;
-        const int win = w0 + pe % curW;
-        resultMatrix[filt][win / outMatCol][win % outMatCol] = outVector[pe];
       }
+    }
+  }
+
+  oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+
+  // The accumulators are 64 bit, the result matrix holds int. Report values that do not fit.
+  if (overflowCount > 0)
+  {
+    std::cout << "ON-CNN: int32 accumulator overflow count=" << overflowCount
+              << " / " << (size_t)plan.kernelDepth * plan.totalWindows << " outputs (sample=" << worstOverflowValue << ")" << std::endl;
+    if (oncnnEnvLong("ONCNN_STRICT", 0) != 0)
+    {
+      std::cout << "ON-CNN Abort: accumulator overflowed int32 with ONCNN_STRICT=1" << std::endl;
+      std::exit(1);
     }
   }
 
   if (std::getenv("ONCNN_PRINT_EQ10"))
   {
-    const uint64_t calls = oncnnEq10Calls(kernelDepth, outMatRow, outMatCol, inputDepth,
-                                          kernelHeight, kernelWidth, numPEs);
-    const uint64_t cyc = oncnnEq10Cycles(kernelDepth, outMatRow, outMatCol, inputDepth,
-                                         kernelHeight, kernelWidth, numPEs);
+    const uint64_t calls = oncnnEq10Calls(plan.kernelDepth, plan.outputHeight, plan.outputWidth, plan.inputDepth,
+                                          plan.kernelHeight, plan.kernelWidth, plan.gridPEs);
+    const uint64_t cyc = oncnnEq10Cycles(plan.kernelDepth, plan.outputHeight, plan.outputWidth, plan.inputDepth,
+                                         plan.kernelHeight, plan.kernelWidth, plan.gridPEs);
     const double clkNs = oncnnClkNs();
     const char *variant = oncnnIsVariantSP() ? "SP" : "SS";
-    const char *packMode = packPixel ? "pixel" : "flat";
     std::cout << "ON-CNN Eq.10 expected: " << cyc << " cycles = " << cyc * clkNs * 1e-6
-              << " ms | calls=" << calls << " (variant=" << variant << ", pack=" << packMode
-              << ", C_SOP=" << oncnnCsop() << ", PEs=" << numPEs << ", grid " << rowsF << "x" << cols << ")"
+              << " ms | calls=" << calls << " (variant=" << variant
+              << ", C_SOP=" << oncnnCsop() << ", PEs=" << plan.gridPEs << ", grid " << plan.gridRows << "x" << plan.gridCols << ")"
               << std::endl;
   }
 }
 
-// Existing signature (2D kernel per filter shared across channels, as the CSV loaders produce)
-void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<int>>> &kernelMatrix, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
+// Overload 1: 3D kernelMatrix [Cout][Hf][Wf] (2D kernel per filter shared across channels, used by CSV loaders)
+void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
+           std::vector<std::vector<std::vector<int>>> &kernelMatrix,
+           std::vector<std::vector<std::vector<int>>> &resultMatrix,
+           int stride, int padding)
 {
-  conv2ONCNN(inputMatrix, kernelMatrix.size(), kernelMatrix[0].size(), kernelMatrix[0][0].size(), [&](int f, int, int r, int s)
-             { return kernelMatrix[f][r][s]; }, resultMatrix, stride, padding);
+  OncnnKernelAccessor accessor;
+  accessor.kernel3D = &kernelMatrix;
+  accessor.kernel4D = nullptr;
+  accessor.is4D = false;
+
+  int kernelDepth = kernelMatrix.size();
+  int kernelHeight = kernelMatrix[0].size();
+  int kernelWidth = kernelMatrix[0][0].size();
+
+  conv2ONCNN(inputMatrix, kernelDepth, kernelHeight, kernelWidth, accessor, resultMatrix, stride, padding);
 }
 
-// True 4D filters [Cout][Cin][Hf][Wf], as in the paper
-void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<std::vector<std::vector<std::vector<int>>>> &kernel4D, std::vector<std::vector<std::vector<int>>> &resultMatrix, int stride, int padding)
+// Overload 2: True 4D filters [Cout][Cin][Hf][Wf], as in the paper and test suite
+void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
+           std::vector<std::vector<std::vector<std::vector<int>>>> &kernel4D,
+           std::vector<std::vector<std::vector<int>>> &resultMatrix,
+           int stride, int padding)
 {
-  conv2ONCNN(inputMatrix, kernel4D.size(), kernel4D[0][0].size(), kernel4D[0][0][0].size(), [&](int f, int c, int r, int s)
-             { return kernel4D[f][c][r][s]; }, resultMatrix, stride, padding);
+  OncnnKernelAccessor accessor;
+  accessor.kernel3D = nullptr;
+  accessor.kernel4D = &kernel4D;
+  accessor.is4D = true;
+
+  int kernelDepth = kernel4D.size();
+  int kernelHeight = kernel4D[0][0].size();
+  int kernelWidth = kernel4D[0][0][0].size();
+
+  conv2ONCNN(inputMatrix, kernelDepth, kernelHeight, kernelWidth, accessor, resultMatrix, stride, padding);
 }
 
 // This should work for bitSIMD or any PIM that requires vertical data layout.

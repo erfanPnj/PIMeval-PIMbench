@@ -316,7 +316,9 @@ PimStatus pimOAReduce(PimObjId src, void *result);
 // fused mac implementation
 PimStatus pimONCNNMac(PimObjId src1, PimObjId src2, PimObjId dest);
 // Broadcast-load unique IFM windows (curW * 16 int16) and filter vectors (curF * 16 int16)
-// into per-PE layout (pe = filt * curW + win) and charge H2D copy for only (curW + curF) * 16 * 2 bytes.
+// into per-PE layout (pe = filt * curW + win) and charge H2D copy for only the unique bytes loaded.
+// Pass nullptr for ifmUnique or fltUnique to skip that operand (it stays untouched and is not charged):
+// charged bytes = ((curW if ifmUnique) + (curF if fltUnique)) * 16 * 2.
 PimStatus pimONCNNLoadOperands(PimObjId ifmObj, PimObjId fltObj, const void *ifmUnique, const void *fltUnique, unsigned curF, unsigned curW);
 
 ////////////////////////////////////////////////////////////////////////////////
