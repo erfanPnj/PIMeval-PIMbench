@@ -982,6 +982,19 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   const uint64_t targetPEs = (uint64_t)oncnnEnvLong("ONCNN_TOTAL_PES", maxHardwarePEs);
   const uint64_t numPEs = std::min(maxHardwarePEs, targetPEs);
 
+  // PLACEMENT CHECK: the timing model assumes every core holds exactly oncnnPEsPerCore() PEs (one core row = k PEs).
+  // PIMeval fills each region with one FULL row, so the data placement only agrees with that assumption when one
+  // row holds exactly k PEs: num_col_per_subarray = 256 * k  (256 bits = 16 lanes x 16 bits per PE).
+  // Example: k = 4  ->  num_col_per_subarray = 1024  ->  4096 PEs on 1024 cores, 4 PEs per core.
+  const uint64_t pesPerRow = deviceProp.numColPerSubarray / (kOnCnnLanes * 16);
+  if (pesPerRow != (uint64_t)oncnnPEsPerCore())
+  {
+    std::cout << "ON-CNN WARNING: one core row holds " << pesPerRow << " PEs (num_col_per_subarray="
+              << deviceProp.numColPerSubarray << ") but the timing model assumes ONCNN_PES_PER_CORE="
+              << oncnnPEsPerCore() << ". Results stay correct, but data placement and the timing/energy model disagree."
+              << " Set num_col_per_subarray = " << (uint64_t)(kOnCnnLanes * 16) * oncnnPEsPerCore() << " to make them match." << std::endl;
+  }
+
   const OncnnLayerPlan plan = oncnnMakeLayerPlan(inputMatrix, kernelDepth, kernelHeight, kernelWidth,
                                                  stride, padding, numPEs);
 

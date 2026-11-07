@@ -1,4 +1,4 @@
-// Test: C++ version of vgg16 (True 4D Conv Filters [Cout][Cin][Hf][Wf])
+// Test: C++ version of vgg16
 // Copyright (c) 2024 University of Virginia
 // This file is licensed under the MIT License.
 // See the LICENSE file in the root of this repository for more details.
@@ -19,12 +19,13 @@
 #include <iomanip>
 #include <chrono>
 #include <cassert>
+#include <random>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <stdexcept>
 
 using namespace std;
-
-using Tensor3D = std::vector<std::vector<std::vector<int>>>;
-using Kernel4D = std::vector<std::vector<std::vector<std::vector<int>>>>;
-using Kernel4DFloat = std::vector<std::vector<std::vector<std::vector<float>>>>;
 
 // Params ---------------------------------------------------------------------
 typedef struct Params
@@ -59,7 +60,7 @@ struct Params getInputParams(int argc, char **argv)
   p.moreDebugPrints = false;
 
   int opt;
-  while ((opt = getopt(argc, argv, "h:c:v:i:k:m:")) >= 0)
+  while ((opt = getopt(argc, argv, "c:v:i:k:m:")) >= 0)
   {
     switch (opt)
     {
@@ -91,159 +92,135 @@ struct Params getInputParams(int argc, char **argv)
   return p;
 }
 
-// Read 4D convolutional weights [Cout][Cin][Hf][Wf] from CSV.
-// CSV format: layer_name, Cout, Cin, Hf, Wf, w0, w1, ...
-Kernel4DFloat read_conv_layer_weights_4d_from_csv(const std::string &filename,
-                                                  const std::string &layer_name,
-                                                  int expectedCout,
-                                                  int expectedCin)
+// ---------------------------------------------------------------------------------------------
+// Real VGG16 has 4D convolution filters: [Cout][Cin][3][3]. Every output channel owns a separate
+// 3x3 kernel for EVERY input channel. The helpers below build / load / convert such 4D filters.
+// ---------------------------------------------------------------------------------------------
+typedef std::vector<std::vector<std::vector<std::vector<float>>>> Kernel4DFloat;
+typedef std::vector<std::vector<std::vector<std::vector<int>>>> Kernel4DInt;
+
+// Random small signed weights in [-2, 2] (used when no weight file is given).
+Kernel4DInt makeRandomKernel4D(int outChannels, int inChannels, int kernelSize, unsigned seed)
+{
+  std::mt19937 generator(seed);
+  std::uniform_int_distribution<int> distribution(-2, 2);
+  Kernel4DInt kernel(outChannels, std::vector<std::vector<std::vector<int>>>(
+                                      inChannels, std::vector<std::vector<int>>(kernelSize, std::vector<int>(kernelSize, 0))));
+  for (int o = 0; o < outChannels; ++o)
+    for (int i = 0; i < inChannels; ++i)
+      for (int r = 0; r < kernelSize; ++r)
+        for (int c = 0; c < kernelSize; ++c)
+          kernel[o][i][r][c] = distribution(generator);
+  return kernel;
+}
+
+// Reads one conv layer from the CSV written by vgg16_weights.py.
+// CSV line format:  name, Cout, Cin, rows, cols, then Cout*Cin*rows*cols weights in [o][i][r][c] order.
+// The file must contain the FULL 4D tensor; the shape is checked against the expected VGG16 shape.
+Kernel4DFloat readConvWeights4DFromCsv(const std::string &filename, const std::string &layerName,
+                                       int expectedOutChannels, int expectedInChannels)
 {
   std::ifstream file(filename);
   std::string line;
-
   while (std::getline(file, line))
   {
-    std::stringstream ss(line);
+    std::stringstream lineStream(line);
     std::string item;
     std::vector<std::string> items;
-
-    while (std::getline(ss, item, ','))
+    while (std::getline(lineStream, item, ','))
     {
       items.push_back(item);
     }
-
-    if (!items.empty() && items[0] == layer_name)
+    if (items.empty() || items[0] != layerName)
     {
-      int cout = std::stoi(items[1]);
-      int cin = std::stoi(items[2]);
-      int rows = std::stoi(items[3]);
-      int cols = std::stoi(items[4]);
+      continue;
+    }
+    const int outChannels = std::stoi(items[1]);
+    const int inChannels = std::stoi(items[2]);
+    const int rows = std::stoi(items[3]);
+    const int cols = std::stoi(items[4]);
+    if (outChannels != expectedOutChannels || inChannels != expectedInChannels || rows != 3 || cols != 3)
+    {
+      throw std::runtime_error("Unexpected filter shape for " + layerName + " in the CSV file (need Cout x Cin x 3 x 3)");
+    }
+    if (items.size() != 5 + (size_t)outChannels * inChannels * rows * cols)
+    {
+      throw std::runtime_error("CSV row of " + layerName + " does not hold the full 4D weight tensor");
+    }
+    Kernel4DFloat kernel(outChannels, std::vector<std::vector<std::vector<float>>>(
+                                          inChannels, std::vector<std::vector<float>>(rows, std::vector<float>(cols, 0.0f))));
+    size_t index = 5;
+    for (int o = 0; o < outChannels; ++o)
+      for (int i = 0; i < inChannels; ++i)
+        for (int r = 0; r < rows; ++r)
+          for (int c = 0; c < cols; ++c)
+            kernel[o][i][r][c] = std::stof(items[index++]);
+    return kernel;
+  }
+  throw std::runtime_error("Layer not found in the CSV file: " + layerName);
+}
 
-      if (cout <= 0)
-        cout = expectedCout;
-      if (cin <= 0)
-        cin = expectedCin;
-
-      Kernel4DFloat kernel4d(
-          cout, std::vector<std::vector<std::vector<float>>>(
-                    cin, std::vector<std::vector<float>>(
-                             rows, std::vector<float>(cols, 0.0f))));
-
-      const size_t availWeights = (items.size() > 5) ? (items.size() - 5) : 0;
-      const size_t full4DCount = static_cast<size_t>(cout) * cin * rows * cols;
-      size_t idx = 5;
-
-      if (availWeights >= full4DCount)
+// Float -> fixed point (same scaling as floatToFixed in utilFixedPoint.h) when verifying,
+// otherwise 0/1 binarization (same as binarizeMatrix in utilML.h).
+Kernel4DInt convertKernel4D(const Kernel4DFloat &kernelFloat, bool useFixedPoint)
+{
+  Kernel4DInt kernel(kernelFloat.size());
+  for (size_t o = 0; o < kernelFloat.size(); ++o)
+  {
+    kernel[o].resize(kernelFloat[o].size());
+    for (size_t i = 0; i < kernelFloat[o].size(); ++i)
+    {
+      kernel[o][i].resize(kernelFloat[o][i].size());
+      for (size_t r = 0; r < kernelFloat[o][i].size(); ++r)
       {
-        for (int co = 0; co < cout; ++co)
+        kernel[o][i][r].resize(kernelFloat[o][i][r].size());
+        for (size_t c = 0; c < kernelFloat[o][i][r].size(); ++c)
         {
-          for (int ci = 0; ci < cin; ++ci)
-          {
-            for (int r = 0; r < rows; ++r)
-            {
-              for (int c = 0; c < cols; ++c)
-              {
-                kernel4d[co][ci][r][c] = std::stof(items[idx++]);
-              }
-            }
-          }
+          const float w = kernelFloat[o][i][r][c];
+          kernel[o][i][r][c] = useFixedPoint ? static_cast<int>(w * FIXED_POINT_SCALING_FACTOR) : (w > 0 ? 1 : 0);
         }
       }
-      else
-      {
-        // Fallback if CSV only stored 1 channel per filter (Cout * Hf * Wf values)
-        for (int co = 0; co < cout; ++co)
-        {
-          for (int r = 0; r < rows; ++r)
-          {
-            for (int c = 0; c < cols; ++c)
-            {
-              float val = (idx < items.size()) ? std::stof(items[idx++]) : 0.0f;
-              for (int ci = 0; ci < cin; ++ci)
-              {
-                kernel4d[co][ci][r][c] = val;
-              }
-            }
-          }
-        }
-      }
-      return kernel4d;
     }
   }
-  throw std::runtime_error("Layer not found in the CSV file: " + layer_name);
+  return kernel;
 }
 
-// Build or load a 4D integer kernel [Cout][Cin][Hf][Wf] for a VGG16 conv layer
-void buildConvKernel4D(const Params &params,
-                       const char *csvLayerName,
-                       int cout,
-                       int cin,
-                       int kh,
-                       int kw,
-                       Kernel4D &kernel4D)
+// The 13 convolution layers of VGG16 (all 3x3, stride 1, padding 1).
+struct ConvLayerSpec
 {
-  kernel4D.clear();
-  kernel4D.resize(cout, Tensor3D(cin));
+  const char *name;    // printed name
+  const char *csvName; // layer name in vgg16_weights.csv
+  int inChannels;      // Cin
+  int outChannels;     // Cout
+  int inputSize;       // height = width of the (unpadded) input feature map
+  bool poolAfter;      // 2x2 max pool after this layer's ReLU
+};
 
-  if (params.kernelMatrixFile == nullptr)
-  {
-    for (int co = 0; co < cout; ++co)
-    {
-      for (int ci = 0; ci < cin; ++ci)
-      {
-        getMatrix(kh, kw, 0, kernel4D[co][ci]);
-      }
-    }
-  }
-  else
-  {
-    Kernel4DFloat kernel4D_f =
-        read_conv_layer_weights_4d_from_csv(params.kernelMatrixFile, csvLayerName, cout, cin);
-    for (int co = 0; co < cout; ++co)
-    {
-      if (params.shouldVerify)
-      {
-        kernel4D[co] = floatToFixed(kernel4D_f[co]);
-      }
-      else
-      {
-        kernel4D[co] = binarizeMatrix(kernel4D_f[co]);
-      }
-    }
-  }
-}
-
-void printKernel4DDimensions(const Kernel4D &k)
-{
-  if (k.empty() || k[0].empty() || k[0][0].empty())
-  {
-    std::cout << "0x0x0x0" << std::endl;
-    return;
-  }
-  std::cout << k.size() << "x" << k[0].size() << "x" << k[0][0].size() << "x" << k[0][0][0].size() << std::endl;
-}
-
-// Pad each channel of a 3D feature map [Cin][H][W] into [Cin][H + 2*pad][W + 2*pad]
-void padFeatureMap3D(int height, int width, int pad, Tensor3D &inMat, Tensor3D &outMat)
-{
-  outMat.clear();
-  outMat.resize(inMat.size());
-  for (size_t c = 0; c < inMat.size(); ++c)
-  {
-    addPadding(height, width, pad, inMat[c], outMat[c]);
-  }
-}
+static const ConvLayerSpec kVgg16ConvLayers[13] = {
+    {"conv1-1", "features.0.weight", 3, 64, 224, false},
+    {"conv1-2", "features.2.weight", 64, 64, 224, true},
+    {"conv2-1", "features.5.weight", 64, 128, 112, false},
+    {"conv2-2", "features.7.weight", 128, 128, 112, true},
+    {"conv3-1", "features.10.weight", 128, 256, 56, false},
+    {"conv3-2", "features.12.weight", 256, 256, 56, false},
+    {"conv3-3", "features.14.weight", 256, 256, 56, true},
+    {"conv4-1", "features.17.weight", 256, 512, 28, false},
+    {"conv4-2", "features.19.weight", 512, 512, 28, false},
+    {"conv4-3", "features.21.weight", 512, 512, 28, true},
+    {"conv5-1", "features.24.weight", 512, 512, 14, false},
+    {"conv5-2", "features.26.weight", 512, 512, 14, false},
+    {"conv5-3", "features.28.weight", 512, 512, 14, true},
+};
 
 int main(int argc, char *argv[])
 {
   struct Params params = getInputParams(argc, argv);
-  Tensor3D inputMatrix;
-  Kernel4D kernelMatrix4D;
-
+  std::vector<std::vector<std::vector<int>>> inputMatrix; // padded input of the current conv layer
   // Dimensions of the input image
   int imageHeight = 224;
   int imageWidth = 224;
   int imageDepth = 3;
+  // Padding for every conv layer
   int padding = 1;
 
   if (params.imageInputFile == nullptr)
@@ -254,11 +231,12 @@ int main(int argc, char *argv[])
       getMatrix(imageHeight, imageWidth, padding, inputMatrix[i]);
     }
   }
-  else
+  else // Get inputMatrix from the input image
   {
 #ifdef COMPILE_WITH_JPEG
+    // If JPEG lib is not supported, below code will not work. In that case disable JPEG by adding COMPILE_WITH_JPEG=0 during make.
     std::string outputFile = "resized_output.jpg";
-    Tensor3D inputMatrixBeforePadding;
+    std::vector<std::vector<std::vector<int>>> inputMatrixBeforePadding;
     readJPEG(params.imageInputFile, inputMatrixBeforePadding, imageHeight, imageWidth);
     writeResizedImage(outputFile, inputMatrixBeforePadding);
     int depth = inputMatrixBeforePadding.size();
@@ -267,308 +245,80 @@ int main(int argc, char *argv[])
       std::cerr << "Assertion failed: depth (" << depth << ") != imageDepth (" << imageDepth << ")\n";
       assert(depth == imageDepth && "Given input image depth does not match with the expected image depth");
     }
-    padFeatureMap3D(imageHeight, imageWidth, padding, inputMatrixBeforePadding, inputMatrix);
+    inputMatrix.resize(depth);
+    for (int d = 0; d < depth; ++d)
+    {
+      addPadding(imageHeight, imageWidth, padding, inputMatrixBeforePadding[d], inputMatrix[d]);
+    }
 #endif
   }
 
   if (!createDevice(params.dramConfigFile))
     return 1;
 
-  Tensor3D resultMatrix1;
-  Tensor3D resultMatrix2;
-
-  // ==================== Block 1 ====================
-  // conv1-1: Cin=3, Cout=64, 224x224, 3x3
-  buildConvKernel4D(params, "features.0.weight", 64, 3, 3, 3, kernelMatrix4D);
-  std::cout << "........starting conv1-1........\n";
-  if (params.moreDebugPrints)
+  // ---- 13 convolution layers (+ ReLU, + 5 max pools), real 4D filters [Cout][Cin][3][3] ----
+  std::vector<std::vector<std::vector<int>>> resultMatrix1; // conv output
+  std::vector<std::vector<std::vector<int>>> resultMatrix2; // pooled output
+  for (int layer = 0; layer < 13; ++layer)
   {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
+    const ConvLayerSpec &spec = kVgg16ConvLayers[layer];
+
+    // Build the 4D filters of this layer
+    Kernel4DInt kernelMatrix;
+    if (params.kernelMatrixFile == nullptr)
+    {
+      kernelMatrix = makeRandomKernel4D(spec.outChannels, spec.inChannels, 3, 1000 + layer);
+    }
+    else
+    {
+      Kernel4DFloat kernelMatrix_f = readConvWeights4DFromCsv(params.kernelMatrixFile, spec.csvName, spec.outChannels, spec.inChannels);
+      kernelMatrix = convertKernel4D(kernelMatrix_f, params.shouldVerify);
+    }
+
+    // Layers after the first one: pad the previous layer's output
+    if (layer > 0)
+    {
+      std::vector<std::vector<std::vector<int>>> &previous = kVgg16ConvLayers[layer - 1].poolAfter ? resultMatrix2 : resultMatrix1;
+      inputMatrix.clear();
+      inputMatrix.resize(previous.size());
+      for (uint64_t i = 0; i < previous.size(); ++i)
+      {
+        addPadding(spec.inputSize, spec.inputSize, padding, previous[i], inputMatrix[i]);
+      }
+      previous.clear();
+      previous.shrink_to_fit();
+    }
+
+    std::cout << "........starting " << spec.name << "........\n";
+    if (params.moreDebugPrints == true)
+    {
+      std::cout << "Input matrix dimensions after padding: ";
+      printMatrixDimensions(inputMatrix);
+      std::cout << "Kernel dimensions [Cout][Cin][Hf][Wf]: " << kernelMatrix.size() << " x " << kernelMatrix[0].size()
+                << " x " << kernelMatrix[0][0].size() << " x " << kernelMatrix[0][0][0].size() << std::endl;
+    }
+    resultMatrix1.clear();
+    conv2(inputMatrix, kernelMatrix, resultMatrix1, 1, 0); // 4D overload: padding was already added above
+    std::cout << "........ending " << spec.name << "........\n";
+
+    // RELU
+    std::cout << "........starting RELU........\n";
+    relu(resultMatrix1);
+    std::cout << "........ending RELU........\n";
+
+    // pool
+    if (spec.poolAfter)
+    {
+      std::cout << "........starting pooling........\n";
+      resultMatrix2.clear();
+      pool(resultMatrix1, 2, 2, 2, resultMatrix2);
+      std::cout << "........ending pooling........\n";
+      resultMatrix1.clear();
+      resultMatrix1.shrink_to_fit();
+    }
   }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv1-1........\n";
+  // After conv5-3 the last pool output (512 x 7 x 7) is in resultMatrix2
 
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv1-2: Cin=64, Cout=64, 224x224, 3x3
-  buildConvKernel4D(params, "features.2.weight", 64, 64, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(224, 224, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv1-2........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv1-2........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  std::cout << "........starting pooling........\n";
-  resultMatrix2.clear();
-  pool(resultMatrix1, 2, 2, 2, resultMatrix2);
-  std::cout << "........ending pooling........\n";
-
-  // ==================== Block 2 ====================
-  // conv2-1: Cin=64, Cout=128, 112x112, 3x3
-  buildConvKernel4D(params, "features.5.weight", 128, 64, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(112, 112, 1, resultMatrix2, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv2-1........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv2-1........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv2-2: Cin=128, Cout=128, 112x112, 3x3
-  buildConvKernel4D(params, "features.7.weight", 128, 128, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(112, 112, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv2-2........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv2-2........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  std::cout << "........starting pooling........\n";
-  resultMatrix2.clear();
-  pool(resultMatrix1, 2, 2, 2, resultMatrix2);
-  std::cout << "........ending pooling........\n";
-
-  // ==================== Block 3 ====================
-  // conv3-1: Cin=128, Cout=256, 56x56, 3x3
-  buildConvKernel4D(params, "features.10.weight", 256, 128, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(56, 56, 1, resultMatrix2, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv3-1........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv3-1........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv3-2: Cin=256, Cout=256, 56x56, 3x3
-  buildConvKernel4D(params, "features.12.weight", 256, 256, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(56, 56, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv3-2........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv3-2........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv3-3: Cin=256, Cout=256, 56x56, 3x3
-  buildConvKernel4D(params, "features.14.weight", 256, 256, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(56, 56, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv3-3........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv3-3........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  std::cout << "........starting pooling........\n";
-  resultMatrix2.clear();
-  pool(resultMatrix1, 2, 2, 2, resultMatrix2);
-  std::cout << "........ending pooling........\n";
-
-  // ==================== Block 4 ====================
-  // conv4-1: Cin=256, Cout=512, 28x28, 3x3
-  buildConvKernel4D(params, "features.17.weight", 512, 256, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(28, 28, 1, resultMatrix2, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv4-1........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv4-1........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv4-2: Cin=512, Cout=512, 28x28, 3x3
-  buildConvKernel4D(params, "features.19.weight", 512, 512, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(28, 28, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv4-2........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv4-2........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv4-3: Cin=512, Cout=512, 28x28, 3x3
-  buildConvKernel4D(params, "features.21.weight", 512, 512, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(28, 28, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv4-3........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv4-3........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  std::cout << "........starting pooling........\n";
-  resultMatrix2.clear();
-  pool(resultMatrix1, 2, 2, 2, resultMatrix2);
-  std::cout << "........ending pooling........\n";
-
-  // ==================== Block 5 ====================
-  // conv5-1: Cin=512, Cout=512, 14x14, 3x3
-  buildConvKernel4D(params, "features.24.weight", 512, 512, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(14, 14, 1, resultMatrix2, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv5-1........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv5-1........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv5-2: Cin=512, Cout=512, 14x14, 3x3
-  buildConvKernel4D(params, "features.26.weight", 512, 512, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(14, 14, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv5-2........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv5-2........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  // conv5-3: Cin=512, Cout=512, 14x14, 3x3
-  buildConvKernel4D(params, "features.28.weight", 512, 512, 3, 3, kernelMatrix4D);
-  padFeatureMap3D(14, 14, 1, resultMatrix1, inputMatrix);
-  resultMatrix1.clear();
-  resultMatrix1.shrink_to_fit();
-  std::cout << "........starting conv5-3........\n";
-  if (params.moreDebugPrints)
-  {
-    std::cout << "Input matrix dimensions after padding: ";
-    printMatrixDimensions(inputMatrix);
-    std::cout << "Kernel 4D dimensions (Cout x Cin x KH x KW): ";
-    printKernel4DDimensions(kernelMatrix4D);
-  }
-  conv2(inputMatrix, kernelMatrix4D, resultMatrix1, 1, 0);
-  std::cout << "........ending conv5-3........\n";
-
-  std::cout << "........starting RELU........\n";
-  relu(resultMatrix1);
-  std::cout << "........ending RELU........\n";
-
-  std::cout << "........starting pooling........\n";
-  resultMatrix2.clear();
-  pool(resultMatrix1, 2, 2, 2, resultMatrix2);
-  std::cout << "........ending pooling........\n";
-
-  // Free 4D conv kernel memory before dense layers
-  kernelMatrix4D.clear();
-  kernelMatrix4D.shrink_to_fit();
-
-  // ==================== Dense Layers ====================
   // dense layer 1
   std::vector<int> flattenedMat;
   flatten3DMat(resultMatrix2, flattenedMat);
@@ -594,6 +344,7 @@ int main(int argc, char *argv[])
   std::cout << "........starting dense1........\n";
   if (params.moreDebugPrints == true)
   {
+    // Check the dimensions of the input and weight matrices
     std::cout << "Input matrix dimensions: " << flattenedMat.size() << std::endl;
     std::cout << "Weight matrix dimensions: ";
     printMatrixDimensions(denseWeight);
@@ -601,6 +352,7 @@ int main(int argc, char *argv[])
   gemv(4096, 25088, flattenedMat, denseWeight, denseOutput1);
   std::cout << "........ending dense1........\n";
 
+  // RELU
   std::cout << "........starting RELU........\n";
   performRelu(denseOutput1);
   std::cout << "........ending RELU........\n";
@@ -627,6 +379,7 @@ int main(int argc, char *argv[])
   std::cout << "........starting dense2........\n";
   if (params.moreDebugPrints == true)
   {
+    // Check the dimensions of the input and weight matrices
     std::cout << "Input matrix dimensions: " << denseOutput1.size() << std::endl;
     std::cout << "Weight matrix dimensions: ";
     printMatrixDimensions(denseWeight);
@@ -634,6 +387,7 @@ int main(int argc, char *argv[])
   gemv(4096, 4096, denseOutput1, denseWeight, denseOutput2);
   std::cout << "........ending dense2........\n";
 
+  // RELU
   std::cout << "........starting RELU........\n";
   performRelu(denseOutput2);
   std::cout << "........ending RELU........\n";
@@ -660,6 +414,7 @@ int main(int argc, char *argv[])
   std::cout << "........starting dense3........\n";
   if (params.moreDebugPrints == true)
   {
+    // Check the dimensions of the input and weight matrices
     std::cout << "Input matrix dimensions: " << denseOutput2.size() << std::endl;
     std::cout << "Weight matrix dimensions: ";
     printMatrixDimensions(denseWeight);
@@ -667,18 +422,44 @@ int main(int argc, char *argv[])
   gemv(1000, 4096, denseOutput2, denseWeight, denseOutput3);
   std::cout << "........ending dense3........\n";
 
+  // perform softmax in host
+  // std::vector<double> resultVector;
+  // std::vector<float> denseOutput3_f;
+  // denseOutput3_f = fixedToFloat(denseOutput3);
+  // auto start = std::chrono::high_resolution_clock::now();
+  // if (params.shouldVerify == true) {
+  //   softmaxOnHost(denseOutput3_f, resultVector);
+  // } else {
+  //   softmaxOnHost(denseOutput3, resultVector);
+  // }
+  // auto end = std::chrono::high_resolution_clock::now();
+  // hostElapsedTime += (end - start);
   std::vector<int> resultVector;
   std::vector<float> resultVector_f;
   softMaxPIM(denseOutput3, resultVector);
   resultVector_f = fixedToFloat(resultVector);
   std::cout << "Dimensions of the softmax output: " << resultVector.size() << std::endl;
 
+  // *********************************************************************************************************************************
+  //  Verification Process:
+  //  The following code initializes a vector of pairs, fills it with the softmax output values and their corresponding indices.
+  //  Then sorts the pairs by value in descending order, and prints out the top 5 values along with their indices.
+  //  These indices can be used to map back to the original 1000 output classes of the VGG16 model.
+  //  The top 5 results are printed as the goal is to see if the correct class label is among the indices of the top 5 values.
+  //  This is important in many classification tasks where the top prediction might not always be correct,
+  //  but the correct label might still be within the top 5 highest probability predictions.
+  // *********************************************************************************************************************************
+
+  // Create a vector of pairs to store value-index pairs
   std::vector<std::pair<double, int>> valueIndexPairs;
+  // Populate the vector with value-index pairs
   for (uint64_t i = 0; i < resultVector.size(); ++i)
   {
     valueIndexPairs.push_back(std::make_pair(resultVector[i], i));
   }
+  // Sort the vector of pairs based on values in descending order
   std::sort(valueIndexPairs.begin(), valueIndexPairs.end(), std::greater<std::pair<double, int>>());
+  // Print the top 5 values along with their indices
   std::cout << "Top 5 values and corresponding indices:\n";
   for (int i = 0; i < 5; ++i)
   {
