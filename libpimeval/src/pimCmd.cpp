@@ -1019,15 +1019,14 @@ bool pimCmdONCNNLoadOperands::sanityCheck() const
   return true;
 }
 
-//! @brief  PIM CMD: ON-CNN Load Operands - update stats (charges unique H2D bytes only)
+//! @brief  PIM CMD: ON-CNN Load Operands
 bool pimCmdONCNNLoadOperands::updateStats() const
 {
   constexpr uint64_t kLanes = 16;
   constexpr uint64_t kBytesPerElem = sizeof(int16_t); // 2 bytes
 
-  // Only operands that are really loaded are charged: curW IFM vectors and/or curF filter vectors
-  const uint64_t numUniqueVectors = (m_ifmUnique ? m_curW : 0) + (m_fltUnique ? m_curF : 0);
-  const uint64_t uniqueBytes = numUniqueVectors * kLanes * kBytesPerElem;
+  const uint64_t numLoadedOperands = (m_ifmUnique ? 1ULL : 0ULL) + (m_fltUnique ? 1ULL : 0ULL);
+  const uint64_t uniqueBytes = numLoadedOperands * static_cast<uint64_t>(m_curF) * m_curW * kLanes * kBytesPerElem;
   const uint64_t uniqueBits = uniqueBytes * 8ULL;
 
   pimeval::perfEnergy mPerfEnergy =
