@@ -319,32 +319,21 @@ void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<s
 //   Every PE consumes the flattened window (Cin * Hf * Wf values) 16 values at a time.
 //   One piece of 16 values is called a CHUNK; a window needs numChunks = ceil(Cin*Hf*Wf / 16) chunks.
 //
-//   For every chunk number c we allocate two PIM objects that cover the whole PE grid:
-//       ifmObjects[c]     : 4096 PEs x 16 lanes  (the 16 IFM values of chunk c, for every PE)
-//       filterObjects[c]  : 4096 PEs x 16 lanes  (the 16 filter values of chunk c, for every PE)
-//   Each object lives in its own row of the subarrays, so ALL chunks of a tile are stored in the
-//   subarray at the same time (the subarray plays the role of the paper's input memory).
-//   After loading, the only thing left is: for each chunk, pimONCNNMac activates the two rows and
-//   the walkers shift the 16 values through the PE (the walker plays the role of the PISO register).
+//   Three PIM objects cover the whole PE grid (allocated once per layer):
+//       ifmVector    : 4096 PEs x 16 int16 values   [PE0's 16 values | PE1's 16 values | ... | PE4095's 16 values]
+//       filterVector : 4096 PEs x 16 int16 values   same PE order, allocated ASSOCIATED with ifmVector
+//       accVector    : 4096 int64 values            one accumulator per PE
+//   The host fills ifmVector and filterVector for EVERY iteration of Algorithm 3 and copies them in with
+//   pimCopyHostToDevice, so every PE holds its own copy of its IFM window and of its filter in its own
+//   subarray row (Fulcrum has no broadcast). Then pimONCNNMac multiplies and accumulates.
+//   Choose num_col_per_subarray = 256 * (PEs per core) so that each core row holds exactly its PEs' data.
 //
-//   Loop structure (Algorithm 3):
-//       for each FILTER BLOCK (256 filters):
-//           load the filters of this block into filterObjects[0 .. numChunks-1]   (ONCE per filter block)
-//           for each WINDOW BLOCK (16 windows):
-//               load the IFM values of this block into ifmObjects[0 .. numChunks-1]
-//               zero the accumulators, run numChunks MAC runs, read the accumulators back
-//
-//   Why not preload the IFM data of the WHOLE layer? It does not fit. The IFM data of one window block
-//   needs numChunks rows per core, and a layer has up to thousands of window blocks (VGG16 conv1-2:
-//   3136 blocks x 36 chunks = 112,896 rows per core, more than a 1024-row subarray config offers).
-//   Even with a huge subarray the simulator would have to keep every PIM object in host memory
-//   (about 128 KiB per object for 4096 PEs, so about 14 GB for conv1-2). Filters of one filter block
-//   are small (numChunks rows) and are reused by every window block, so they stay resident.
-//
-//   Rows needed per core at any time = (2 * numChunks + 1) * (rows per object per core).
-//   For the largest VGG16 layer (numChunks = 288) that is 577 rows when a core holds one row of each object.
-//   (PIMeval merges two subarrays into one Fulcrum core, so a core has 2 x num_row_per_subarray rows.)
-//   oncnnCheckCoreCapacity() prints the exact need and stops with a clear message if a core has too few rows.
+//   Loop structure (exactly Algorithm 3):
+//       for each WINDOW BLOCK (16 windows):
+//         for each FILTER BLOCK (256 filters):
+//           zero the accumulators
+//           for each CHUNK (16 values): fill ifmVector + filterVector, copy to PIM, one MAC run
+//           read the accumulators back
 //
 // OTHER MODELING NOTES
 //   1. Flat packing (Algorithm 3, Eq. 6, 9, 10, Table 4): the window is flattened as
@@ -605,306 +594,6 @@ inline bool oncnnLaneToWindowPosition(const OncnnLayerPlan &plan, int chunk, int
   return true;
 }
 
-// Build the IFM values of ONE chunk for ONE window block.
-// Result: gridCols vectors of 16 values (one vector per PE column), stored one after the other:
-//   ifmVectors[windowColumn * 16 + lane]
-// Windows that do not exist (the last window block may be partly empty) and lanes behind the end of
-// the window stay 0, and so do values that fall into the zero padding of the image.
-inline void oncnnBuildIfmChunk(const OncnnLayerPlan &plan,
-                               const std::vector<std::vector<std::vector<int>>> &inputMatrix,
-                               int windowBlock, int chunk, std::vector<int16_t> &ifmVectors)
-{
-  std::fill(ifmVectors.begin(), ifmVectors.end(), 0);
-
-  for (int windowColumn = 0; windowColumn < plan.gridCols; ++windowColumn)
-  {
-    const int windowIndex = windowBlock * plan.gridCols + windowColumn;
-    if (windowIndex >= plan.totalWindows)
-    {
-      break; // idle PE column: its IFM values stay 0
-    }
-    const int outputRow = windowIndex / plan.outputWidth;
-    const int outputCol = windowIndex % plan.outputWidth;
-
-    for (int lane = 0; lane < kOnCnnLanes; ++lane)
-    {
-      int channel = 0;
-      int kernelRow = 0;
-      int kernelCol = 0;
-      if (!oncnnLaneToWindowPosition(plan, chunk, lane, channel, kernelRow, kernelCol))
-      {
-        break; // the remaining lanes are behind the end of the window
-      }
-      const int inputRow = outputRow * plan.stride + kernelRow - plan.padding;
-      const int inputCol = outputCol * plan.stride + kernelCol - plan.padding;
-      if (inputRow >= 0 && inputRow < plan.inputHeight && inputCol >= 0 && inputCol < plan.inputWidth)
-      {
-        ifmVectors[windowColumn * kOnCnnLanes + lane] =
-            oncnnCheckAndCastToInt16(inputMatrix[channel][inputRow][inputCol], "activation");
-      }
-    }
-  }
-}
-
-// Build the filter values of ONE chunk for ONE filter block.
-// Result: gridRows vectors of 16 values (one vector per PE row = per group of 16 PEs):
-//   filterVectors[filterRow * 16 + lane]
-// Filter rows that do not exist (the last filter block may have fewer than gridRows filters) stay 0.
-inline void oncnnBuildFilterChunk(const OncnnLayerPlan &plan, const OncnnKernelAccessor &kernel,
-                                  int filterBlock, int chunk, std::vector<int16_t> &filterVectors)
-{
-  std::fill(filterVectors.begin(), filterVectors.end(), 0);
-
-  for (int filterRow = 0; filterRow < plan.gridRows; ++filterRow)
-  {
-    const int filterIndex = filterBlock * plan.gridRows + filterRow;
-    if (filterIndex >= plan.kernelDepth)
-    {
-      break; // idle PE row: its filter values stay 0
-    }
-    for (int lane = 0; lane < kOnCnnLanes; ++lane)
-    {
-      int channel = 0;
-      int kernelRow = 0;
-      int kernelCol = 0;
-      if (!oncnnLaneToWindowPosition(plan, chunk, lane, channel, kernelRow, kernelCol))
-      {
-        break;
-      }
-      filterVectors[filterRow * kOnCnnLanes + lane] =
-          oncnnCheckAndCastToInt16(oncnnGetWeight(kernel, filterIndex, channel, kernelRow, kernelCol), "weight");
-    }
-  }
-}
-
-// Make sure the cores have enough rows to keep all chunks of one tile resident.
-// One operand object holds gridPEs * 16 int16 values. Fulcrum stores it as regions of one row each,
-// spread over all cores. We need numChunks IFM objects + numChunks filter objects + 1 accumulator object.
-// Note: PIMeval merges two subarrays into one Fulcrum core, so a core has 2 x num_row_per_subarray rows
-// (deviceProp.numRowPerCore).
-inline void oncnnCheckCoreCapacity(const OncnnLayerPlan &plan, const PimDeviceProperties &deviceProp)
-{
-  const uint64_t bitsPerObject = (uint64_t)plan.gridPEs * kOnCnnLanes * 16;
-  const uint64_t regionsPerObject = oncnnCeilDiv(bitsPerObject, deviceProp.numColPerSubarray);
-  const uint64_t rowsPerObjectPerCore = oncnnCeilDiv(regionsPerObject, deviceProp.numPIMCores);
-  const uint64_t objectsNeeded = 2ULL * plan.numChunks + 1ULL;
-  const uint64_t rowsNeeded = objectsNeeded * rowsPerObjectPerCore;
-
-  if (oncnnLogDetailsEnabled())
-  {
-    std::printf("[ON-CNN] resident rows per core: %lu needed (%lu objects x %lu rows), %u available\n",
-                (unsigned long)rowsNeeded, (unsigned long)objectsNeeded,
-                (unsigned long)rowsPerObjectPerCore, deviceProp.numRowPerCore);
-  }
-  if (rowsNeeded > deviceProp.numRowPerCore)
-  {
-    std::cout << "ON-CNN Abort: this layer needs " << rowsNeeded << " rows per core ("
-              << plan.numChunks << " chunks x 2 operands + accumulator, " << rowsPerObjectPerCore
-              << " row(s) per object per core) but a core has only " << deviceProp.numRowPerCore
-              << " rows. Increase num_row_per_subarray in the PIMeval .cfg file." << std::endl;
-    std::exit(1);
-  }
-}
-
-// Free every PIM object that was allocated for the layer (objects that are -1 are skipped)
-inline void oncnnFreeLayerObjects(std::vector<PimObjId> &ifmObjects, std::vector<PimObjId> &filterObjects,
-                                  PimObjId &accObject)
-{
-  for (size_t i = 0; i < ifmObjects.size(); ++i)
-  {
-    if (ifmObjects[i] != -1)
-    {
-      pimFree(ifmObjects[i]);
-      ifmObjects[i] = -1;
-    }
-  }
-  for (size_t i = 0; i < filterObjects.size(); ++i)
-  {
-    if (filterObjects[i] != -1)
-    {
-      pimFree(filterObjects[i]);
-      filterObjects[i] = -1;
-    }
-  }
-  if (accObject != -1)
-  {
-    pimFree(accObject);
-    accObject = -1;
-  }
-}
-
-// Allocate the PIM objects of one layer:
-//   ifmObjects[chunk], filterObjects[chunk] : gridPEs * 16 int16 values each
-//   accObject                               : one int64 accumulator per PE (one per group of 16 lanes)
-// ifmObjects[0] is the "anchor": all other objects are allocated associated with it, so every object
-// has the same layout and lives in the same cores.
-inline bool oncnnAllocateLayerObjects(const OncnnLayerPlan &plan, std::vector<PimObjId> &ifmObjects,
-                                      std::vector<PimObjId> &filterObjects, PimObjId &accObject)
-{
-  const uint64_t elementsPerObject = (uint64_t)plan.gridPEs * kOnCnnLanes;
-  ifmObjects.assign(plan.numChunks, -1);
-  filterObjects.assign(plan.numChunks, -1);
-  accObject = -1;
-
-  ifmObjects[0] = pimAlloc(PIM_ALLOC_AUTO, elementsPerObject, PIM_INT16);
-  if (ifmObjects[0] == -1)
-  {
-    std::cout << "ON-CNN Abort: pimAlloc failed for the IFM object of chunk 0" << std::endl;
-    return false;
-  }
-  for (int chunk = 1; chunk < plan.numChunks; ++chunk)
-  {
-    ifmObjects[chunk] = pimAllocAssociated(ifmObjects[0], PIM_INT16);
-    if (ifmObjects[chunk] == -1)
-    {
-      std::cout << "ON-CNN Abort: out of PIM memory while allocating the IFM object of chunk " << chunk << std::endl;
-      oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
-      return false;
-    }
-  }
-  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
-  {
-    filterObjects[chunk] = pimAllocAssociated(ifmObjects[0], PIM_INT16);
-    if (filterObjects[chunk] == -1)
-    {
-      std::cout << "ON-CNN Abort: out of PIM memory while allocating the filter object of chunk " << chunk << std::endl;
-      oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
-      return false;
-    }
-  }
-  accObject = pimAllocAssociatedGrouped(ifmObjects[0], PIM_INT64, kOnCnnLanes);
-  if (accObject == -1)
-  {
-    std::cout << "ON-CNN Abort: could not allocate the accumulator object" << std::endl;
-    oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
-    return false;
-  }
-  return true;
-}
-
-// Load the filters of one filter block into filterObjects (all chunks).
-// Done once per filter block: the filters stay in the subarray while all window blocks stream through.
-inline bool oncnnLoadFilterBlock(const OncnnLayerPlan &plan, const OncnnKernelAccessor &kernel, int filterBlock,
-                                 const std::vector<PimObjId> &ifmObjects, const std::vector<PimObjId> &filterObjects)
-{
-  std::vector<int16_t> filterVectors(plan.gridRows * kOnCnnLanes, 0);
-  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
-  {
-    oncnnBuildFilterChunk(plan, kernel, filterBlock, chunk, filterVectors);
-    if (oncnnLogDetailsEnabled())
-    {
-      std::printf("[DATA_COPY] H2D Filters (filter block %d, chunk %d): %zu bytes\n", filterBlock, chunk,
-                  filterVectors.size() * sizeof(int16_t));
-    }
-    // nullptr = do not touch the IFM object. Each of the gridRows filter vectors is expanded to the 16 PEs of its group.
-    PimStatus status = pimONCNNLoadOperands(ifmObjects[chunk], filterObjects[chunk], nullptr, filterVectors.data(),
-                                            (unsigned)plan.gridRows, (unsigned)plan.gridCols);
-    if (status != PIM_OK)
-    {
-      std::cout << "ON-CNN Abort: loading filters failed (filter block " << filterBlock << ", chunk " << chunk << ")" << std::endl;
-      return false;
-    }
-  }
-  return true;
-}
-
-// Load the IFM windows of one window block into ifmObjects (all chunks).
-inline bool oncnnLoadWindowBlock(const OncnnLayerPlan &plan,
-                                 const std::vector<std::vector<std::vector<int>>> &inputMatrix, int windowBlock,
-                                 const std::vector<PimObjId> &ifmObjects, const std::vector<PimObjId> &filterObjects)
-{
-  std::vector<int16_t> ifmVectors(plan.gridCols * kOnCnnLanes, 0);
-  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
-  {
-    oncnnBuildIfmChunk(plan, inputMatrix, windowBlock, chunk, ifmVectors);
-    if (oncnnLogDetailsEnabled())
-    {
-      std::printf("[DATA_COPY] H2D IFM (window block %d, chunk %d): %zu bytes\n", windowBlock, chunk,
-                  ifmVectors.size() * sizeof(int16_t));
-    }
-    // nullptr = do not touch the filter object. Each of the gridCols window vectors is expanded to its PE column in every group.
-    PimStatus status = pimONCNNLoadOperands(ifmObjects[chunk], filterObjects[chunk], ifmVectors.data(), nullptr,
-                                            (unsigned)plan.gridRows, (unsigned)plan.gridCols);
-    if (status != PIM_OK)
-    {
-      std::cout << "ON-CNN Abort: loading IFM failed (window block " << windowBlock << ", chunk " << chunk << ")" << std::endl;
-      return false;
-    }
-  }
-  return true;
-}
-
-// Run one tile (= one filter block x one window block) on the PE grid.
-// The operands of this tile are already resident in the subarrays.
-inline bool oncnnRunOneTile(const OncnnLayerPlan &plan, int filterBlock, int windowBlock,
-                            const std::vector<PimObjId> &ifmObjects, const std::vector<PimObjId> &filterObjects,
-                            PimObjId accObject, std::vector<std::vector<std::vector<int>>> &resultMatrix,
-                            size_t &overflowCount, int64_t &worstOverflowValue)
-{
-  const int firstFilter = filterBlock * plan.gridRows;
-  const int filtersInBlock = std::min(plan.gridRows, plan.kernelDepth - firstFilter);
-  const int firstWindow = windowBlock * plan.gridCols;
-  const int windowsInBlock = std::min(plan.gridCols, plan.totalWindows - firstWindow);
-
-  // The PE rows that hold real filters are always the first filtersInBlock groups, i.e. PEs
-  // 0 .. busyPEs-1. We only reset and read back these accumulators (idle rows only multiply by zero).
-  const int busyPEs = filtersInBlock * plan.gridCols;
-
-  // 1. Reset the accumulators
-  std::vector<int64_t> zeros(busyPEs, 0);
-  if (oncnnLogDetailsEnabled())
-  {
-    std::printf("[DATA_COPY] H2D Zero-Init Acc: %zu bytes\n", zeros.size() * sizeof(int64_t));
-  }
-  if (pimCopyHostToDevice(zeros.data(), accObject, 0, busyPEs) != PIM_OK)
-  {
-    std::cout << "ON-CNN Abort: resetting the accumulators failed" << std::endl;
-    return false;
-  }
-
-  // 2. One MAC run per chunk: every PE multiplies its 16 IFM values with its 16 filter values,
-  //    adds the 16 products and adds the sum to its accumulator
-  for (int chunk = 0; chunk < plan.numChunks; ++chunk)
-  {
-    if (pimONCNNMac(ifmObjects[chunk], filterObjects[chunk], accObject) != PIM_OK)
-    {
-      std::cout << "ON-CNN Abort: pimONCNNMac failed (chunk " << chunk << ")" << std::endl;
-      return false;
-    }
-  }
-
-  // 3. Read the accumulators back
-  std::vector<int64_t> accumulators(busyPEs, 0);
-  if (oncnnLogDetailsEnabled())
-  {
-    std::printf("[DATA_COPY] D2H Read Acc: %zu bytes\n", accumulators.size() * sizeof(int64_t));
-  }
-  if (pimCopyDeviceToHost(accObject, accumulators.data(), 0, busyPEs) != PIM_OK)
-  {
-    std::cout << "ON-CNN Abort: reading the accumulators failed" << std::endl;
-    return false;
-  }
-
-  // 4. Copy the real results (not the idle PEs) into the result matrix
-  for (int filterRow = 0; filterRow < filtersInBlock; ++filterRow)
-  {
-    for (int windowColumn = 0; windowColumn < windowsInBlock; ++windowColumn)
-    {
-      const int pe = filterRow * plan.gridCols + windowColumn;
-      const int64_t value = accumulators[pe];
-      if (value < INT32_MIN || value > INT32_MAX)
-      {
-        ++overflowCount;
-        worstOverflowValue = value;
-      }
-      const int filterIndex = firstFilter + filterRow;
-      const int windowIndex = firstWindow + windowColumn;
-      resultMatrix[filterIndex][windowIndex / plan.outputWidth][windowIndex % plan.outputWidth] = static_cast<int>(value);
-    }
-  }
-  return true;
-}
-
 // Percentile-calibrated, round-to-nearest, saturating requantization to int16 (host-side).
 inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
 {
@@ -1001,40 +690,200 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   resultMatrix.assign(plan.kernelDepth,
                       std::vector<std::vector<int>>(plan.outputHeight, std::vector<int>(plan.outputWidth, 0)));
 
-  oncnnCheckCoreCapacity(plan, deviceProp);
-
-  std::vector<PimObjId> ifmObjects;
-  std::vector<PimObjId> filterObjects;
-  PimObjId accObject = -1;
-  if (!oncnnAllocateLayerObjects(plan, ifmObjects, filterObjects, accObject))
+  // ---------------------------------------------------------------------------------------------
+  // Three PIM objects for the whole layer. Each one has one slot of 16 values for EVERY PE:
+  //   ifmVector    : 4096 PEs x 16 int16 values  (the 16 IFM values each PE multiplies in this iteration)
+  //   filterVector : 4096 PEs x 16 int16 values  (the 16 filter values each PE multiplies in this iteration)
+  //   accVector    : 4096 int64 values           (one accumulator per PE, i.e. one per group of 16 lanes)
+  // filterVector and accVector are allocated ASSOCIATED with ifmVector, so element i of all three objects
+  // sits in the same core, which is what makes the MAC valid.
+  // ---------------------------------------------------------------------------------------------
+  const uint64_t vectorElements = (uint64_t)plan.gridPEs * kOnCnnLanes;
+  PimObjId ifmVector = pimAlloc(PIM_ALLOC_AUTO, vectorElements, PIM_INT16);
+  if (ifmVector == -1)
   {
+    std::cout << "ON-CNN Abort: pimAlloc failed for ifmVector" << std::endl;
     return;
   }
+  PimObjId filterVector = pimAllocAssociated(ifmVector, PIM_INT16);
+  PimObjId accVector = pimAllocAssociatedGrouped(ifmVector, PIM_INT64, kOnCnnLanes);
+  if (filterVector == -1 || accVector == -1)
+  {
+    std::cout << "ON-CNN Abort: could not allocate filterVector / accVector" << std::endl;
+    pimFree(ifmVector);
+    if (filterVector != -1)
+      pimFree(filterVector);
+    if (accVector != -1)
+      pimFree(accVector);
+    return;
+  }
+
+  // Host-side copies of the three objects. We fill them and then copy them to the PIM objects.
+  std::vector<int16_t> ifmHost(vectorElements, 0);
+  std::vector<int16_t> filterHost(vectorElements, 0);
+  std::vector<int64_t> accHost(plan.gridPEs, 0);
+  const std::vector<int64_t> accZeros(plan.gridPEs, 0);
 
   size_t overflowCount = 0;
   int64_t worstOverflowValue = 0;
 
-  // Algorithm 3 / Eq. 6 loops: filter blocks (T*R filters) -> window blocks (C windows) -> chunks (M = 16)
-  for (int filterBlock = 0; filterBlock < plan.numFilterBlocks; ++filterBlock)
+    // ---------------------------------------------------------------------------------------------
+  // Algorithm 3 of the paper, with the paper's names:
+  //   C = number of IFM windows processed in parallel  (PE columns)  = 16
+  //   R = number of filters processed in parallel      (PE rows)     = 256   (T x R in the paper)
+  //   M = number of multipliers per PE                               = 16
+  //
+  //   for (w = 0; w < Hout*Wout; w += C)
+  //     for (f = 0; f < Cout; f += R)
+  //       for (c = 0; c < Cin*Hf*Wf; c += M)
+  //         OUT[f][w] += IN[c] * W[f][c]
+  // ---------------------------------------------------------------------------------------------
+  const int C = plan.gridCols;
+  const int R = plan.gridRows;
+  const int M = kOnCnnLanes;
+  const int totalWindows = plan.totalWindows; // Hout * Wout
+  const int Cout = plan.kernelDepth;
+  const int windowLength = plan.windowLength; // Cin * Hf * Wf
+
+  // w = number of the FIRST IFM window of the current window block (the block holds windows w .. w+C-1)
+  for (int w = 0; w < totalWindows; w += C)
   {
-    if (!oncnnLoadFilterBlock(plan, kernelAccessor, filterBlock, ifmObjects, filterObjects))
+    // f = number of the FIRST filter of the current filter block (the block holds filters f .. f+R-1)
+    for (int f = 0; f < Cout; f += R)
     {
-      oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
-      return;
-    }
-    for (int windowBlock = 0; windowBlock < plan.numWindowBlocks; ++windowBlock)
-    {
-      if (!oncnnLoadWindowBlock(plan, inputMatrix, windowBlock, ifmObjects, filterObjects) ||
-          !oncnnRunOneTile(plan, filterBlock, windowBlock, ifmObjects, filterObjects, accObject,
-                           resultMatrix, overflowCount, worstOverflowValue))
+      // Start of one (window block, filter block) pair: all 4096 PEs begin with an accumulator of 0.
+      // Each PE will sum up, chunk after chunk, ONE output value OUT[filter][window].
+      if (pimCopyHostToDevice((void *)accZeros.data(), accVector, 0, plan.gridPEs) != PIM_OK)
       {
-        oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+        std::cout << "ON-CNN Abort: resetting the accumulators failed" << std::endl;
+        pimFree(ifmVector);
+        pimFree(filterVector);
+        pimFree(accVector);
         return;
       }
-    }
-  }
 
-  oncnnFreeLayerObjects(ifmObjects, filterObjects, accObject);
+      // c = position in the flattened window (Cin*Hf*Wf values) of the FIRST value of the current chunk.
+      // One iteration = one chunk of M = 16 values = one MAC run of every PE.
+      for (int c = 0; c < windowLength; c += M)
+      {
+        // STEP 1: decode the 16 multiplier lanes of this chunk.
+        // Lane l works on flat position c + l of the window. flat position = pixel * Cin + channel, so we can
+        // find which (channel, kernelRow, kernelCol) it is. The IFM and the filter use the SAME decoding,
+        // so lane l of a window always meets lane l of its filter.
+        // A lane past the end of the window (last chunk) is an idle multiplier and gets 0.
+        int laneChannel[kOnCnnLanes];
+        int laneKernelRow[kOnCnnLanes];
+        int laneKernelCol[kOnCnnLanes];
+        bool laneIsReal[kOnCnnLanes];
+        for (int lane = 0; lane < M; ++lane)
+        {
+          laneIsReal[lane] = oncnnLaneToWindowPosition(plan, c / M, lane, laneChannel[lane], laneKernelRow[lane], laneKernelCol[lane]);
+        }
+
+        // STEP 2: fill ifmVector and filterVector, PE after PE, 16 values per PE.
+        //   PE number = filterRow * C + windowColumn      (filterRow 0..R-1, windowColumn 0..C-1)
+        //   PE (filterRow, windowColumn) gets
+        //     in ifmVector   : the chunk of IFM window number  w + windowColumn   -> same window in every row
+        //     in filterVector: the chunk of filter number      f + filterRow      -> same filter in every column
+        for (int filterRow = 0; filterRow < R; ++filterRow)
+        {
+          const int filterIndex = f + filterRow; // which filter this PE row works on
+          for (int windowColumn = 0; windowColumn < C; ++windowColumn)
+          {
+            const int windowIndex = w + windowColumn; // which IFM window this PE column works on
+            const int pe = filterRow * C + windowColumn;
+
+            // Output position of this window (row, column in the output feature map)
+            int outputRow = 0;
+            int outputCol = 0;
+            if (windowIndex < totalWindows)
+            {
+              outputRow = windowIndex / plan.outputWidth;
+              outputCol = windowIndex % plan.outputWidth;
+            }
+
+            for (int lane = 0; lane < M; ++lane)
+            {
+              int ifmValue = 0;    // stays 0 for: idle window, idle lane, zero padding
+              int filterValue = 0; // stays 0 for: idle filter, idle lane
+              if (laneIsReal[lane])
+              {
+                if (windowIndex < totalWindows)
+                {
+                  // IN[c]: the input pixel under kernel position (kernelRow, kernelCol) of this window
+                  const int inputRow = outputRow * plan.stride + laneKernelRow[lane] - plan.padding;
+                  const int inputCol = outputCol * plan.stride + laneKernelCol[lane] - plan.padding;
+                  if (inputRow >= 0 && inputRow < plan.inputHeight && inputCol >= 0 && inputCol < plan.inputWidth)
+                  {
+                    ifmValue = inputMatrix[laneChannel[lane]][inputRow][inputCol];
+                  }
+                }
+                if (filterIndex < Cout)
+                {
+                  // W[f][c]: the weight of this filter at the same kernel position
+                  filterValue = oncnnGetWeight(kernelAccessor, filterIndex, laneChannel[lane], laneKernelRow[lane], laneKernelCol[lane]);
+                }
+              }
+              ifmHost[(size_t)pe * M + lane] = oncnnCheckAndCastToInt16(ifmValue, "activation");
+              filterHost[(size_t)pe * M + lane] = oncnnCheckAndCastToInt16(filterValue, "weight");
+            }
+          }
+        }
+
+        // STEP 3: copy both vectors into the subarrays, then ONE MAC run on all PEs at once:
+        //   acc[pe] += IN[c .. c+M-1] . W[f][c .. c+M-1]     (16 multiplications, summed, added to the accumulator)
+        // This is the line  OUT[f][w] += IN[c] x W[f][c]  of Algorithm 3, executed for 256 filters x 16 windows x 16 values.
+        if (pimCopyHostToDevice((void *)ifmHost.data(), ifmVector, 0, vectorElements) != PIM_OK ||
+            pimCopyHostToDevice((void *)filterHost.data(), filterVector, 0, vectorElements) != PIM_OK ||
+            pimONCNNMac(ifmVector, filterVector, accVector) != PIM_OK)
+        {
+          std::cout << "ON-CNN Abort: copy or MAC failed (w=" << w << ", f=" << f << ", c=" << c << ")" << std::endl;
+          pimFree(ifmVector);
+          pimFree(filterVector);
+          pimFree(accVector);
+          return;
+        }
+      } // end of the c loop: every accumulator now holds the complete dot product of its filter and window
+
+      // STEP 4: read the 4096 accumulators back and store them as OUT[f + filterRow][window w + windowColumn].
+      // PEs of idle rows (filter number >= Cout) and idle columns (window number >= Hout*Wout) are skipped.
+      if (pimCopyDeviceToHost(accVector, (void *)accHost.data(), 0, plan.gridPEs) != PIM_OK)
+      {
+        std::cout << "ON-CNN Abort: reading the accumulators failed" << std::endl;
+        pimFree(ifmVector);
+        pimFree(filterVector);
+        pimFree(accVector);
+        return;
+      }
+      for (int filterRow = 0; filterRow < R; ++filterRow)
+      {
+        const int filterIndex = f + filterRow;
+        if (filterIndex >= Cout)
+        {
+          break; // idle PE rows
+        }
+        for (int windowColumn = 0; windowColumn < C; ++windowColumn)
+        {
+          const int windowIndex = w + windowColumn;
+          if (windowIndex >= totalWindows)
+          {
+            break; // idle PE columns
+          }
+          const int64_t value = accHost[filterRow * C + windowColumn];
+          if (value < INT32_MIN || value > INT32_MAX)
+          {
+            ++overflowCount;
+            worstOverflowValue = value;
+          }
+          resultMatrix[filterIndex][windowIndex / plan.outputWidth][windowIndex % plan.outputWidth] = static_cast<int>(value);
+        }
+      }
+    } // end of the f loop
+  }   // end of the w loop
+
+  pimFree(ifmVector);
+  pimFree(filterVector);
+  pimFree(accVector);
 
   // The accumulators are 64 bit, the result matrix holds int. Report values that do not fit.
   if (overflowCount > 0)
