@@ -575,24 +575,6 @@ inline OncnnLayerPlan oncnnMakeLayerPlan(const std::vector<std::vector<std::vect
   return plan;
 }
 
-// Which (channel, kernelRow, kernelCol) is multiplier lane `lane` of chunk number `chunk` working on?
-// The window is flattened as  flatIndex = pixel * Cin + channel  with  pixel = kernelRow * Wf + kernelCol
-// and then cut into pieces of 16 values.
-// Returns false when this lane is behind the end of the window (an idle multiplier).
-inline bool oncnnLaneToWindowPosition(const OncnnLayerPlan &plan, int chunk, int lane,
-                                      int &channel, int &kernelRow, int &kernelCol)
-{
-  const int flatIndex = chunk * kOnCnnLanes + lane;
-  if (flatIndex >= plan.windowLength)
-  {
-    return false;
-  }
-  const int pixel = flatIndex / plan.inputDepth;
-  channel = flatIndex % plan.inputDepth;
-  kernelRow = pixel / plan.kernelWidth;
-  kernelCol = pixel % plan.kernelWidth;
-  return true;
-}
 
 // Percentile-calibrated, round-to-nearest, saturating requantization to int16 (host-side).
 inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
@@ -727,23 +709,73 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   size_t overflowCount = 0;
   int64_t worstOverflowValue = 0;
 
-    // ---------------------------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------------------------
+  // PREPARATION: flatten every IFM window and every filter into a plain list of windowLength values.
+  // Flatten order (the same for windows and filters):  position = pixel * Cin + channel,
+  //                                                     pixel    = kernelRow * Wf + kernelCol
+  // so the list reads: [pixel0 ch0, pixel0 ch1, ..., pixel1 ch0, pixel1 ch1, ...].
+  // Because windows and filters use the same order, value k of a window always meets value k of a filter.
+  // ---------------------------------------------------------------------------------------------
+  const int C = plan.gridCols;                // number of IFM windows processed in parallel (PE columns) = 16
+  const int R = plan.gridRows;                // number of filters processed in parallel     (PE rows)    = 256
+  const int M = kOnCnnLanes;                  // number of multipliers per PE                              = 16
+  const int totalWindows = plan.totalWindows; // Hout * Wout
+  const int Cout = plan.kernelDepth;
+  const int Cin = plan.inputDepth;
+  const int windowLength = plan.windowLength; // Cin * Hf * Wf
+
+  // flatWindows[windowIndex][position]: all values the kernel sees for that output window (0 where it sees padding)
+  std::vector<std::vector<int16_t>> flatWindows(totalWindows, std::vector<int16_t>(windowLength, 0));
+  for (int windowIndex = 0; windowIndex < totalWindows; ++windowIndex)
+  {
+    const int outputRow = windowIndex / plan.outputWidth;
+    const int outputCol = windowIndex % plan.outputWidth;
+    int position = 0;
+    for (int kernelRow = 0; kernelRow < plan.kernelHeight; ++kernelRow)
+    {
+      for (int kernelCol = 0; kernelCol < plan.kernelWidth; ++kernelCol)
+      {
+        const int inputRow = outputRow * plan.stride + kernelRow - plan.padding;
+        const int inputCol = outputCol * plan.stride + kernelCol - plan.padding;
+        const bool insideImage = (inputRow >= 0 && inputRow < plan.inputHeight && inputCol >= 0 && inputCol < plan.inputWidth);
+        for (int channel = 0; channel < Cin; ++channel)
+        {
+          if (insideImage)
+          {
+            flatWindows[windowIndex][position] = oncnnCheckAndCastToInt16(inputMatrix[channel][inputRow][inputCol], "activation");
+          }
+          position++; // padding stays 0
+        }
+      }
+    }
+  }
+
+  // flatFilters[filterIndex][position]: all weights of that filter, in the same order
+  std::vector<std::vector<int16_t>> flatFilters(Cout, std::vector<int16_t>(windowLength, 0));
+  for (int filterIndex = 0; filterIndex < Cout; ++filterIndex)
+  {
+    int position = 0;
+    for (int kernelRow = 0; kernelRow < plan.kernelHeight; ++kernelRow)
+    {
+      for (int kernelCol = 0; kernelCol < plan.kernelWidth; ++kernelCol)
+      {
+        for (int channel = 0; channel < Cin; ++channel)
+        {
+          flatFilters[filterIndex][position] =
+              oncnnCheckAndCastToInt16(oncnnGetWeight(kernelAccessor, filterIndex, channel, kernelRow, kernelCol), "weight");
+          position++;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Algorithm 3 of the paper, with the paper's names:
-  //   C = number of IFM windows processed in parallel  (PE columns)  = 16
-  //   R = number of filters processed in parallel      (PE rows)     = 256   (T x R in the paper)
-  //   M = number of multipliers per PE                               = 16
-  //
   //   for (w = 0; w < Hout*Wout; w += C)
   //     for (f = 0; f < Cout; f += R)
   //       for (c = 0; c < Cin*Hf*Wf; c += M)
   //         OUT[f][w] += IN[c] * W[f][c]
   // ---------------------------------------------------------------------------------------------
-  const int C = plan.gridCols;
-  const int R = plan.gridRows;
-  const int M = kOnCnnLanes;
-  const int totalWindows = plan.totalWindows; // Hout * Wout
-  const int Cout = plan.kernelDepth;
-  const int windowLength = plan.windowLength; // Cin * Hf * Wf
 
   // w = number of the FIRST IFM window of the current window block (the block holds windows w .. w+C-1)
   for (int w = 0; w < totalWindows; w += C)
@@ -762,75 +794,48 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
         return;
       }
 
-      // c = position in the flattened window (Cin*Hf*Wf values) of the FIRST value of the current chunk.
+      // c = position in the flattened window of the FIRST value of the current chunk.
       // One iteration = one chunk of M = 16 values = one MAC run of every PE.
       for (int c = 0; c < windowLength; c += M)
       {
-        // STEP 1: decode the 16 multiplier lanes of this chunk.
-        // Lane l works on flat position c + l of the window. flat position = pixel * Cin + channel, so we can
-        // find which (channel, kernelRow, kernelCol) it is. The IFM and the filter use the SAME decoding,
-        // so lane l of a window always meets lane l of its filter.
-        // A lane past the end of the window (last chunk) is an idle multiplier and gets 0.
-        int laneChannel[kOnCnnLanes];
-        int laneKernelRow[kOnCnnLanes];
-        int laneKernelCol[kOnCnnLanes];
-        bool laneIsReal[kOnCnnLanes];
-        for (int lane = 0; lane < M; ++lane)
-        {
-          laneIsReal[lane] = oncnnLaneToWindowPosition(plan, c / M, lane, laneChannel[lane], laneKernelRow[lane], laneKernelCol[lane]);
-        }
-
-        // STEP 2: fill ifmVector and filterVector, PE after PE, 16 values per PE.
+        // STEP 1: fill ifmVector and filterVector, PE after PE, 16 values per PE.
         //   PE number = filterRow * C + windowColumn      (filterRow 0..R-1, windowColumn 0..C-1)
         //   PE (filterRow, windowColumn) gets
-        //     in ifmVector   : the chunk of IFM window number  w + windowColumn   -> same window in every row
-        //     in filterVector: the chunk of filter number      f + filterRow      -> same filter in every column
+        //     in ifmVector   : values c .. c+15 of the flattened IFM window number  w + windowColumn  (same window in every row)
+        //     in filterVector: values c .. c+15 of the flattened filter number      f + filterRow     (same filter in every column)
+        //   A PE with no real window (w + windowColumn >= Hout*Wout) or no real filter (f + filterRow >= Cout)
+        //   gets zeros, and so do values behind the end of the window (last chunk).
         for (int filterRow = 0; filterRow < R; ++filterRow)
         {
-          const int filterIndex = f + filterRow; // which filter this PE row works on
+          const int filterIndex = f + filterRow;
           for (int windowColumn = 0; windowColumn < C; ++windowColumn)
           {
-            const int windowIndex = w + windowColumn; // which IFM window this PE column works on
+            const int windowIndex = w + windowColumn;
             const int pe = filterRow * C + windowColumn;
-
-            // Output position of this window (row, column in the output feature map)
-            int outputRow = 0;
-            int outputCol = 0;
-            if (windowIndex < totalWindows)
-            {
-              outputRow = windowIndex / plan.outputWidth;
-              outputCol = windowIndex % plan.outputWidth;
-            }
 
             for (int lane = 0; lane < M; ++lane)
             {
-              int ifmValue = 0;    // stays 0 for: idle window, idle lane, zero padding
-              int filterValue = 0; // stays 0 for: idle filter, idle lane
-              if (laneIsReal[lane])
+              const int position = c + lane; // position inside the flattened window / filter
+              int16_t ifmValue = 0;
+              int16_t filterValue = 0;
+              if (position < windowLength)
               {
                 if (windowIndex < totalWindows)
                 {
-                  // IN[c]: the input pixel under kernel position (kernelRow, kernelCol) of this window
-                  const int inputRow = outputRow * plan.stride + laneKernelRow[lane] - plan.padding;
-                  const int inputCol = outputCol * plan.stride + laneKernelCol[lane] - plan.padding;
-                  if (inputRow >= 0 && inputRow < plan.inputHeight && inputCol >= 0 && inputCol < plan.inputWidth)
-                  {
-                    ifmValue = inputMatrix[laneChannel[lane]][inputRow][inputCol];
-                  }
+                  ifmValue = flatWindows[windowIndex][position];
                 }
                 if (filterIndex < Cout)
                 {
-                  // W[f][c]: the weight of this filter at the same kernel position
-                  filterValue = oncnnGetWeight(kernelAccessor, filterIndex, laneChannel[lane], laneKernelRow[lane], laneKernelCol[lane]);
+                  filterValue = flatFilters[filterIndex][position];
                 }
               }
-              ifmHost[(size_t)pe * M + lane] = oncnnCheckAndCastToInt16(ifmValue, "activation");
-              filterHost[(size_t)pe * M + lane] = oncnnCheckAndCastToInt16(filterValue, "weight");
+              ifmHost[(size_t)pe * M + lane] = ifmValue;
+              filterHost[(size_t)pe * M + lane] = filterValue;
             }
           }
         }
 
-        // STEP 3: copy both vectors into the subarrays, then ONE MAC run on all PEs at once:
+        // STEP 2: copy both vectors into the subarrays, then ONE MAC run on all PEs at once:
         //   acc[pe] += IN[c .. c+M-1] . W[f][c .. c+M-1]     (16 multiplications, summed, added to the accumulator)
         // This is the line  OUT[f][w] += IN[c] x W[f][c]  of Algorithm 3, executed for 256 filters x 16 windows x 16 values.
         if (pimCopyHostToDevice((void *)ifmHost.data(), ifmVector, 0, vectorElements) != PIM_OK ||
@@ -845,7 +850,7 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
         }
       } // end of the c loop: every accumulator now holds the complete dot product of its filter and window
 
-      // STEP 4: read the 4096 accumulators back and store them as OUT[f + filterRow][window w + windowColumn].
+      // STEP 3: read the 4096 accumulators back and store them as OUT[f + filterRow][window w + windowColumn].
       // PEs of idle rows (filter number >= Cout) and idle columns (window number >= Hout*Wout) are skipped.
       if (pimCopyDeviceToHost(accVector, (void *)accHost.data(), 0, plan.gridPEs) != PIM_OK)
       {
