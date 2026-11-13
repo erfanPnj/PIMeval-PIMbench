@@ -833,6 +833,27 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
             }
           }
         }
+        // --- VERIFICATION CHECK INSIDE THE CHUNK LOOP (right before pimCopyHostToDevice) ---
+        const int activeFilterRows = std::max(0, std::min(R, Cout - f));
+        const size_t firstIdleIdx = (size_t)activeFilterRows * C * M; // 256 when activeFilterRows == 1
+
+        // 1. Check that all idle PE rows (from firstIdleIdx to 4096*16 - 1) are zero-filled
+        size_t nonZeroInIdleRows = 0;
+        for (size_t idx = firstIdleIdx; idx < vectorElements; ++idx)
+        {
+          if (filterHost[idx] != 0)
+          {
+            ++nonZeroInIdleRows;
+          }
+        }
+        if (nonZeroInIdleRows > 0)
+        {
+          std::cout << "ERROR: Found " << nonZeroInIdleRows << " non-zero elements in idle PE rows!" << std::endl;
+        }
+        // Print the result for this chunk
+        // std::cout << "[DEBUG] Chunk " << c << " | Active Rows: " << activeFilterRows
+        //           << " | First Idle Index: " << firstIdleIdx
+        //           << " | Non-Zero in Idle Rows: " << nonZeroInIdleRows << std::endl;
 
         // STEP 2: copy both vectors into the subarrays, then ONE MAC run on all PEs at once:
         //   acc[pe] += IN[c .. c+M-1] . W[f][c .. c+M-1]     (16 multiplications, summed, added to the accumulator)
