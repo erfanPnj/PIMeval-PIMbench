@@ -22,7 +22,7 @@ ifeq ($(COMPILE_WITH_JPEG), 1)
 endif
 
 # Define both executables
-EXECS := vgg16.out test_net.out
+EXECS := vgg16.out test_net.out baseline_vgg16.out
 
 debug perf dramsim3_integ: $(EXECS)
 
@@ -32,6 +32,10 @@ vgg16.out: vgg16.cpp $(DEPS)
 
 # Rule for test_net
 test_net.out: test_net.cpp $(DEPS)
+	$(CXX) $< $(CXXFLAGS) $(LDFLAGS) -o $@
+
+# Rule for baseline vgg16
+baseline_vgg16.out: baseline_vgg16.cpp $(DEPS)
 	$(CXX) $< $(CXXFLAGS) $(LDFLAGS) -o $@
 
 clean:

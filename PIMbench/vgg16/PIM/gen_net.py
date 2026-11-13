@@ -1,45 +1,22 @@
 # usage: python3 gen_net.py PROFILE SEED QUANT
 #   PROFILE : A  = 3 conv layers, small values: all activations stay below 32767 (requantization must do nothing)
 #             B  = A + a 4th conv (stride 2), pixel-like inputs (0..255) and weights -7..7: requantization MUST kick in
+#             C  = big layers: 300 filters (2 filter blocks at 4096 PEs), 400 windows (25 window blocks), Cin*Hf*Wf not a
+#                  multiple of 16, a non-square 2x3 kernel at the end
+#             D  = requantization with SATURATION: bulk of the input is above 32767 and a few outliers are huge
+#                  (run it with ONCNN_CALIB_PCT=0.99, run_net_tests.sh does that)
 #   SEED    : integer, makes the random data reproducible
 #   QUANT   : new = percentile requantizer (ONCNN_CALIB_PCT, default 0.9999, round-to-nearest, saturate)
 #             old = max-based floor shift (your original oncnnRequantize)
-import sys, os, math
+import sys, os
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view as swv
 
 profile, seed, quant = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-assert profile in ("A", "B") and quant in ("old", "new")
+assert profile in ("A", "B", "C", "D") and quant in ("old", "new")
 PCT = float(os.environ.get("ONCNN_CALIB_PCT", "0.9999"))
-PACK = os.environ.get("ONCNN_PACK", "flat").lower()
-assert PACK in ("flat", "pixel")
-VARIANT = os.environ.get("ONCNN_VARIANT", "SS").upper()
-assert VARIANT in ("SS", "SP")
-TOTAL_PES = int(os.environ.get("ONCNN_TOTAL_PES", "4096"))
-LANES = 16
-COLS_C = 16
-DELTA_M = int(os.environ.get("ONCNN_DELTA_M", "2" if VARIANT == "SP" else "3"))
-DELTA_A = int(os.environ.get("ONCNN_DELTA_A", "2"))
-PA_BITS = int(os.environ.get("ONCNN_PA", "16"))
-TREE_LVL = int(math.ceil(math.log2(LANES)))
-C_SOP = DELTA_M + DELTA_A * TREE_LVL + 2 * PA_BITS + TREE_LVL
 INT16_MAX = 32767
 rng = np.random.default_rng(seed)
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-def ref_chunks_and_calls(cout, hout, wout, cin, kh, kw, num_pes=TOTAL_PES, pack=PACK):
-    cols = min(COLS_C, num_pes)
-    rows_f = max(1, num_pes // cols)
-    outer = ceil_div(cout, rows_f) * ceil_div(hout * wout, cols)
-    if pack == "pixel":
-        chunks = kh * kw * ceil_div(cin, LANES)
-        cycles = outer * (C_SOP + 1) * chunks
-    else:
-        chunks = ceil_div(cin * kh * kw, LANES)
-        cycles = outer * ceil_div((C_SOP + 1) * cin * kh * kw, LANES)
-    return chunks, outer * chunks, cycles
 
 # ---- network description: (type, params...) ----------------------------------------------
 C, H, W = 3, 12, 16
@@ -48,6 +25,14 @@ net = [("conv", 8, 3, 3, 1, 1, "4d"), ("relu",), ("pool", 2, 2),
        ("conv", 20, 3, 3, 1, 1, "4d"), ("relu",)]
 if profile == "B":
     net += [("conv", 8, 3, 3, 2, 1, "3d")]           # stride 2, signed output, no ReLU
+if profile == "C":
+    C, H, W = 3, 20, 20
+    net = [("conv", 300, 3, 3, 1, 1, "4d"), ("relu",), ("pool", 2, 2),     # 400 windows, 300 filters
+           ("conv", 8, 3, 3, 2, 0, "4d"), ("relu",),                       # Cin=300: 2700 values per window, stride 2
+           ("conv", 6, 2, 3, 1, 0, "3d")]                                  # non-square kernel (Hf != Wf)
+if profile == "D":
+    C, H, W = 4, 32, 32
+    net = [("conv", 5, 3, 3, 1, 1, "4d")]
 
 # ---- reference operators (independent of the C++ code) -----------------------------------
 def requant(x):
@@ -67,6 +52,8 @@ def requant(x):
     if s == 0: return x, 0, 0, 0
     half = 1 << (s - 1)
     q = (a + half) >> s
+    # independent cross-check of the integer rounding: round half away from zero, done with floating point
+    assert (q == np.floor(a / 2.0**s + 0.5).astype(np.int64)).all(), "requant reference disagrees with itself"
     clipped = int((q > INT16_MAX).sum()); q = np.minimum(q, INT16_MAX)
     return np.where(x < 0, -q, q), s, clipped, int(((a != 0) & (q == 0)).sum())
 
@@ -85,12 +72,17 @@ def pool(x, k, s):
     return y
 
 # ---- run the reference ---------------------------------------------------------------------
-XMAX, WMAX = (4, 1) if profile == "A" else (256, 7)                 # B: pixel-like inputs and bigger weights
+XMAX, WMAX = (4, 1) if profile in ("A", "C") else (256, 7)         # B, D: pixel-like inputs and bigger weights
 x = rng.integers(0, XMAX, size=(C, H, W)).astype(np.int64)
+if profile == "D":
+    WMAX = 1
+    x = rng.integers(40000, 60000, size=(C, H, W)).astype(np.int64)  # most values do not fit in int16
+    flat = x.reshape(-1)
+    flat[rng.choice(flat.size, 10, replace=False)] = 5_000_000         # a few huge outliers -> must saturate
+    x = flat.reshape(C, H, W)
+total_calls = 0                                                      # expected number of pimONCNNMac calls
 meta, weights, expected = [f"input {C} {H} {W}"], [], []
 cur = x
-total_calls = 0
-total_cycles = 0
 for li, st in enumerate(net):
     if st[0] == "conv":
         _, cout, kh, kw, stride, pad, mode = st
@@ -102,12 +94,14 @@ for li, st in enumerate(net):
             w4 = np.repeat(w3[:, None], cin, axis=1)               # same kernel on every channel
         xq, s, clipped, zeroed = requant(cur)
         if profile == "A": assert s == 0, "profile A must not need requantization"
+        if profile == "D": assert s > 0 and clipped > 0, "profile D must shift AND saturate (use ONCNN_CALIB_PCT=0.99)"
+        # expected pimONCNNMac calls (Eq. 6): filter blocks x window blocks x chunks, for P PEs (grid C x R)
+        P = int(os.environ.get("ONCNN_TOTAL_PES", "4096")); gc = min(16, P); gr = max(1, P // gc)
+        oh = (cur.shape[1] + 2 * pad - kh) // stride + 1; ow = (cur.shape[2] + 2 * pad - kw) // stride + 1
+        total_calls += -(-cout // gr) * -(-(oh * ow) // gc) * -(-(cin * kh * kw) // 16)
         cur = conv(xq, w4, stride, pad)
-        assert np.abs(cur).max() < 2**31
-        chunks, calls, cyc = ref_chunks_and_calls(cout, cur.shape[1], cur.shape[2], cin, kh, kw)
-        total_calls += calls
-        total_cycles += cyc
-        print(f"stage {li}: conv {mode} -> {cur.shape}  input shift={s} clipped={clipped} nonzero->0={zeroed}  chunks={chunks} calls={calls} eq10_cycles={cyc}")
+        assert np.abs(cur).max() < 2**31, "reference overflows int32"
+        print(f"stage {li}: conv {mode} -> {cur.shape}  input shift={s} clipped={clipped} nonzero->0={zeroed}")
         meta.append(f"conv {cout} {kh} {kw} {stride} {pad} {mode}")
     elif st[0] == "relu":
         cur = np.maximum(cur, 0); meta.append("relu")
@@ -116,9 +110,9 @@ for li, st in enumerate(net):
         cur = pool(cur, st[1], st[2]); meta.append(f"pool {st[1]} {st[2]}")
         print(f"stage {li}: pool -> {cur.shape}")
     expected.append(cur.flatten())
-print(f"ref_summary: pack={PACK} variant={VARIANT} total_calls={total_calls} total_eq10_cycles={total_cycles}")
 sv = lambda arr, fn: open(fn, "w").write(" ".join(map(str, arr.tolist())))
 sv(x.flatten(), "net_input.txt")
 sv(np.concatenate([w.flatten() for w in weights]), "net_weights.txt")
 sv(np.concatenate(expected), "net_expected.txt")
+open("net_calls.txt", "w").write(str(total_calls) + "\n")
 open("net_meta.txt", "w").write("\n".join(meta) + "\n")

@@ -343,7 +343,7 @@ void performConvONCNN(std::vector<std::vector<int>> &filterMatrix, std::vector<s
 //        SP: dM = 2, clock 1.1 ns -> C_SOP = 46 (47 cycles per MAC run)
 //   3. Not modeled / done on the host: requantization to int16 (oncnnRequantize), ReLU and pooling
 //      (the paper's PPU), tile/column power gating (idle PEs still consume simulated energy),
-//      and the on-chip broadcast network itself (pimONCNNLoadOperands only charges the unique bytes).
+//      and the on-chip broadcast network itself .
 
 constexpr int kOnCnnLanes = 16; // M: number of multipliers per PE
 constexpr int kOnCnnCols = 16;  // C: number of IFM windows processed in parallel
@@ -574,7 +574,6 @@ inline OncnnLayerPlan oncnnMakeLayerPlan(const std::vector<std::vector<std::vect
   plan.numWindowBlocks = (int)oncnnCeilDiv(plan.totalWindows, plan.gridCols);
   return plan;
 }
-
 
 // Percentile-calibrated, round-to-nearest, saturating requantization to int16 (host-side).
 inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
@@ -884,7 +883,7 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
         }
       }
     } // end of the f loop
-  }   // end of the w loop
+  } // end of the w loop
 
   pimFree(ifmVector);
   pimFree(filterVector);

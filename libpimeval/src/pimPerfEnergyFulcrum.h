@@ -27,10 +27,8 @@
 //!     which yields 47 cycles (SS) or 46 cycles (SP) for M=16, delta_A=2, Pa=16.
 //!   - Intentionally NOT modeled in this perf/energy class or handled host-side:
 //!     1) Requantization to int16 is performed on the host per layer (dynamic percentile shift).
-//!     2) ReLU and MaxPooling are executed outside conv2ONCNN rather than on the paper's PPU.
-//!     3) On-chip Input/Output memories (Fig. 9) are modeled via H2D/D2H transfers
-//!        (pimONCNNLoadOperands charges unique H2D bytes (curW + curF) * 16 * 2 per chunk).
-//!     4) Tile and column power gating (Sec. IV-D, Tables 3-4) are not subtracted in the
+//!     2) ReLU and MaxPooling are executed outside conv2ONCNN rather than on the paper's PPU..
+//!     3) Tile and column power gating (Sec. IV-D, Tables 3-4) are not subtracted in the
 //!        energy model; all configured cores in the scaled RAM config are charged.
 class pimPerfEnergyFulcrum : public pimPerfEnergyBase
 {

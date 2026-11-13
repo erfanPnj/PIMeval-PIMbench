@@ -60,7 +60,7 @@ struct Params getInputParams(int argc, char **argv)
   p.moreDebugPrints = false;
 
   int opt;
-  while ((opt = getopt(argc, argv, "c:v:i:k:m:")) >= 0)
+  while ((opt = getopt(argc, argv, "hc:v:i:k:m:")) >= 0)
   {
     switch (opt)
     {
