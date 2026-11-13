@@ -1,8 +1,17 @@
+// ONE-LINE SWITCH FOR THE CONVOLUTION DATA TYPE OF THE BASELINE
+//   Default (nothing defined)        : convolution path uses PIM_INT16 / int16_t  (int16 baseline experiment)
+//   Uncomment the next line (or compile with -DBASELINE_CONV_INT32) : convolution path uses PIM_INT32 / int32_t (original baseline)
+// Only performConv4D and aggregateConv follow the switch. ReLU, max pool, GEMV and softmax are always PIM_INT32.
+// #define BASELINE_CONV_INT32
+
 // PIMeval Simulator - Application Utilities for Machine Learning Code.
 // The utilies for Conv, MaxPooling, RELU, GEMV are got from their respective cpp files. So, any change in the individual cpp file should also be updated here manually.
 // Copyright (c) 2024 University of Virginia
 // This file is licensed under the MIT License.
 // See the LICENSE file in the root of this repository for more details.
+
+// INT16 BASELINE EXPERIMENT: only the convolution path (performConv4D + aggregateConv) uses PIM_INT16.
+// ReLU, max pool, GEMV and softmax stay PIM_INT32, exactly like the original baseline.
 
 #ifndef PIM_FUNC_SIM_APPS_UTIL_ML_H
 #define PIM_FUNC_SIM_APPS_UTIL_ML_H
@@ -23,8 +32,19 @@
 #include <sstream>
 #if defined(COMPILE_WITH_JPEG)
 #include <jpeglib.h>
-#endif  
+#endif
 using namespace std;
+
+// Data type of the convolution path (see the switch at the top of this file)
+#ifdef BASELINE_CONV_INT32
+#define CONV_PIM_TYPE PIM_INT32
+typedef int32_t ConvHostType;
+#define CONV_BITS 32ULL
+#else
+#define CONV_PIM_TYPE PIM_INT16
+typedef int16_t ConvHostType;
+#define CONV_BITS 16ULL
+#endif
 
 std::chrono::duration<double, std::milli> hostElapsedTime = std::chrono::duration<double, std::milli>::zero();
 
@@ -34,7 +54,7 @@ void decomposeMatrix(int matrixRow, int matrixColumn, int kernelHeight, int kern
 {
   // Calculate the number of rows and columns for the decomposed matrix
   int numRows = kernelHeight * kernelWidth;
-  int numCols = ((matrixRow - kernelHeight + 2 * padding) / stride + 1) * ((matrixColumn - kernelWidth + 2 * padding) / stride + 1);  
+  int numCols = ((matrixRow - kernelHeight + 2 * padding) / stride + 1) * ((matrixColumn - kernelWidth + 2 * padding) / stride + 1);
   // Initialize the decomposed matrix with the correct size
   decompMatrix.resize(numRows, std::vector<int>(numCols, 0));
 
@@ -66,7 +86,7 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
     return;
   }
 
-  PimStatus status = pimCopyHostToDevice((void *) src.data(), srcObj);
+  PimStatus status = pimCopyHostToDevice((void *)src.data(), srcObj);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for src vector" << std::endl;
@@ -87,9 +107,9 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
     std::cout << "Function: " << __func__ << "Abort: pimSubScalar failed" << std::endl;
     return;
   }
-  
+
   dst.resize(vectorLength);
-  status = pimCopyDeviceToHost(srcObj, (void *) dst.data());
+  status = pimCopyDeviceToHost(srcObj, (void *)dst.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for dst vector" << std::endl;
@@ -97,7 +117,7 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
   }
 
   auto start = std::chrono::high_resolution_clock::now();
-  #pragma omp parallel for
+#pragma omp parallel for
   for (size_t i = 0; i < vectorLength; ++i)
   {
     dst[i] = std::exp(static_cast<double>(dst[i]));
@@ -105,14 +125,14 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
   auto end = std::chrono::high_resolution_clock::now();
   hostElapsedTime += (end - start);
 
-  status = pimCopyHostToDevice((void *) dst.data(), srcObj);
+  status = pimCopyHostToDevice((void *)dst.data(), srcObj);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for dst vector" << std::endl;
     return;
   }
-  
-  int32_t redsum = 0;
+
+  int64_t redsum = 0;
   status = pimRedSum(srcObj, &redsum);
   if (status != PIM_OK)
   {
@@ -127,16 +147,15 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
     return;
   }
 
-  status = pimCopyDeviceToHost(srcObj, (void *) dst.data());
+  status = pimCopyDeviceToHost(srcObj, (void *)dst.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for dst vector" << std::endl;
     return;
   }
-  
+
   pimFree(srcObj);
 }
-
 
 // Function to perform softmax operation on Host.
 //  -> Find the max value in the input vector
@@ -148,35 +167,35 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
 template <typename T>
 void softmaxOnHost(const std::vector<T> &input, std::vector<double> &output)
 {
-    // Find the maximum value in the input vector for numerical stability
-    T max_input = *std::max_element(input.begin(), input.end());
+  // Find the maximum value in the input vector for numerical stability
+  T max_input = *std::max_element(input.begin(), input.end());
 
-    // Compute the exponentials of each element (subtracting the max value for stability)
-    std::vector<double> exponentials(input.size());
-    
-    #pragma omp parallel for
-    for (size_t i = 0; i < input.size(); ++i)
-    {
-        exponentials[i] = std::exp(static_cast<double>(input[i] - max_input));
-    }
+  // Compute the exponentials of each element (subtracting the max value for stability)
+  std::vector<double> exponentials(input.size());
 
-    // Compute the sum of exponentials
-    double sum_exponentials = 0.0;
-    
-    #pragma omp parallel for reduction(+:sum_exponentials)
-    for (size_t i = 0; i < exponentials.size(); ++i)
-    {
-        sum_exponentials += exponentials[i];
-    }
+#pragma omp parallel for
+  for (size_t i = 0; i < input.size(); ++i)
+  {
+    exponentials[i] = std::exp(static_cast<double>(input[i] - max_input));
+  }
 
-    // Compute the softmax values
-    output.resize(input.size());
-    
-    #pragma omp parallel for
-    for (size_t i = 0; i < input.size(); ++i)
-    {
-        output[i] = exponentials[i] / sum_exponentials;
-    }
+  // Compute the sum of exponentials
+  double sum_exponentials = 0.0;
+
+#pragma omp parallel for reduction(+ : sum_exponentials)
+  for (size_t i = 0; i < exponentials.size(); ++i)
+  {
+    sum_exponentials += exponentials[i];
+  }
+
+  // Compute the softmax values
+  output.resize(input.size());
+
+#pragma omp parallel for
+  for (size_t i = 0; i < input.size(); ++i)
+  {
+    output[i] = exponentials[i] / sum_exponentials;
+  }
 }
 
 // Perform the convolution operation in PIM between the filter matrix and the input matrix.
@@ -241,63 +260,77 @@ void performConv(std::vector<std::vector<int>> &filterMatrix, std::vector<std::v
   pimFree(matrixObject);
 }
 
+// Sum the per-channel partial results with a pairwise reduction tree on PIM.
+// The PIM objects are CONV_PIM_TYPE, so the data is held in a working copy (data16) of the conv element type on the host.
 void aggregateConv(std::vector<int> &inputVector, std::vector<int> &outputVector, unsigned hopSize)
 {
+  // 16-bit working copy of the partial sums
+  std::vector<ConvHostType> data16(inputVector.size());
+  for (size_t k = 0; k < inputVector.size(); ++k)
+  {
+    data16[k] = static_cast<ConvHostType>(inputVector[k]);
+  }
 
-  uint64_t numChunks = inputVector.size() / hopSize;
+  uint64_t numChunks = data16.size() / hopSize;
   uint64_t remChunk = numChunks;
   while (remChunk > 1)
   {
     uint64_t reduceChunks = remChunk;
-    std::vector<int> tempVector(hopSize, 0);
+    std::vector<ConvHostType> tempVector16(hopSize, 0);
 
     // If remChunk is odd, save the last chunk and exclude from current level reduction
-    if (remChunk % 2) {
-      std::copy(inputVector.end() - hopSize, inputVector.end(), tempVector.begin());
+    if (remChunk % 2)
+    {
+      std::copy(data16.end() - hopSize, data16.end(), tempVector16.begin());
       reduceChunks = remChunk - 1;
     }
 
     uint64_t length = (reduceChunks / 2) * hopSize;
 
-    PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, length, PIM_INT32);
-    PimObjId dstObj = pimAllocAssociated(srcObj, PIM_INT32);
+    PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, length, CONV_PIM_TYPE);
+    PimObjId dstObj = pimAllocAssociated(srcObj, CONV_PIM_TYPE);
 
-    if (srcObj == -1 || dstObj == -1) {
+    if (srcObj == -1 || dstObj == -1)
+    {
       std::cerr << "Function: " << __func__ << "Abort: pimAlloc failed\n";
       return;
     }
 
-    pimCopyHostToDevice((void *)inputVector.data(), srcObj);                // left halves
-    pimCopyHostToDevice((void *)(inputVector.data() + length), dstObj);       // right halves
+    pimCopyHostToDevice((void *)data16.data(), srcObj);            // left halves
+    pimCopyHostToDevice((void *)(data16.data() + length), dstObj); // right halves
 
     pimAdd(srcObj, dstObj, dstObj);
-    inputVector.resize(length);
-    pimCopyDeviceToHost(dstObj, inputVector.data());
+    data16.resize(length);
+    pimCopyDeviceToHost(dstObj, data16.data());
 
     pimFree(srcObj);
     pimFree(dstObj);
 
     // If we saved a leftover chunk, add it to the result
-    if (reduceChunks != remChunk) {
-      PimObjId finalSrc = pimAlloc(PIM_ALLOC_AUTO, hopSize, PIM_INT32);
-      PimObjId finalDst = pimAllocAssociated(finalSrc, PIM_INT32);
+    if (reduceChunks != remChunk)
+    {
+      PimObjId finalSrc = pimAlloc(PIM_ALLOC_AUTO, hopSize, CONV_PIM_TYPE);
+      PimObjId finalDst = pimAllocAssociated(finalSrc, CONV_PIM_TYPE);
 
-      if (finalSrc == -1 || finalDst == -1) {
+      if (finalSrc == -1 || finalDst == -1)
+      {
         std::cerr << "Function: " << __func__ << "Abort: final PIM alloc failed\n";
         return;
       }
 
-      pimCopyHostToDevice(inputVector.data(), finalSrc);
-      pimCopyHostToDevice(tempVector.data(), finalDst);
+      pimCopyHostToDevice(data16.data(), finalSrc);
+      pimCopyHostToDevice(tempVector16.data(), finalDst);
       pimAdd(finalSrc, finalDst, finalDst);
-      pimCopyDeviceToHost(finalDst, inputVector.data());
+      pimCopyDeviceToHost(finalDst, data16.data());
 
       pimFree(finalSrc);
       pimFree(finalDst);
     }
     remChunk = reduceChunks / 2;
   }
-  outputVector = inputVector;
+
+  // widen back to int for the rest of the program
+  outputVector.assign(data16.begin(), data16.end());
 }
 
 // Function executing the convolution between a 3D input matrix and a 3D kernel based on a given stride and padding.
@@ -308,14 +341,15 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
 {
   PimDeviceProperties deviceProp;
   PimStatus status = pimGetDeviceProperties(&deviceProp);
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
     exit(1);
   }
   // Get the device parameters
   uint64_t numCols = deviceProp.numColPerSubarray;
   uint64_t numRows = deviceProp.numRowPerSubarray;
-  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;  
+  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;
 
   int inputDepth = inputMatrix.size();
   int inputHeight = inputMatrix[0].size();
@@ -325,8 +359,8 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
   int kernelWidth = kernelMatrix[0][0].size();
 
   int outMatRow = std::floor((inputHeight - kernelHeight) / stride) + 1;
-  int outMatCol = std::floor((inputWidth - kernelWidth) / stride) + 1;   
-  int numOfMatPerRow = floor((1.0 * numOfBits) / (outMatRow * outMatCol)) <  inputDepth ? floor((1.0 * numOfBits) / (outMatRow * outMatCol)) : inputDepth;
+  int outMatCol = std::floor((inputWidth - kernelWidth) / stride) + 1;
+  int numOfMatPerRow = floor((1.0 * numOfBits) / (outMatRow * outMatCol)) < inputDepth ? floor((1.0 * numOfBits) / (outMatRow * outMatCol)) : inputDepth;
   int numOfPIMRow = kernelHeight * kernelWidth;
 
   resultMatrix.resize(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol)));
@@ -344,14 +378,15 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
       for (int k = j; k < matChunk; k++)
       {
         std::vector<std::vector<int>> decompMat;
-	      decomposeMatrix(inputHeight, inputWidth, kernelMatrix[i].size(), kernelMatrix[i][0].size(), stride, 0, inputMatrix[k], decompMat);
+        decomposeMatrix(inputHeight, inputWidth, kernelMatrix[i].size(), kernelMatrix[i][0].size(), stride, 0, inputMatrix[k], decompMat);
         // Merge the matrices
-        for (uint64_t idx = 0; idx < mergedMat.size(); idx++) {
+        for (uint64_t idx = 0; idx < mergedMat.size(); idx++)
+        {
           mergedMat[idx].insert(mergedMat[idx].end(),
                                 std::make_move_iterator(decompMat[idx].begin()),
                                 std::make_move_iterator(decompMat[idx].end()));
         }
-        tempcol = mergedMat[0].size();     
+        tempcol = mergedMat[0].size();
       }
       performConv(kernelMatrix[i], mergedMat, outVector, numOfPIMRow, tempcol);
     }
@@ -366,7 +401,231 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
         resultMatrix[i][rdx][cdx] = dstVec[ddx++];
       }
     }
-  }  
+  }
+}
+
+// Perform the 4D convolution operation in PIM for a chunk of input channels [channelOffset .. channelOffset + numChannelsInChunk - 1]
+// of a single 3D filter (filter3D has shape [Cin][Hf][Wf]).
+// The three PIM objects (accumulator, image row, weight row) are CONV_PIM_TYPE, so every host buffer that is
+// copied to / from them is an ConvHostType buffer (PIMeval copies with the element size of the PIM object).
+// The merged rows come in as std::vector<int>; they are narrowed to ConvHostType right before each copy.
+// NOTE: products and sums of 16-bit values can overflow 16 bits. The values wrap around, which is fine for a
+// data-copy / command-count experiment, but the numerical result of the network is not meaningful.
+void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
+                   int channelOffset,
+                   int numChannelsInChunk,
+                   int hopSize,
+                   std::vector<std::vector<int>> &inputMatrix,
+                   std::vector<int> &outputMatrix,
+                   int numRequiredPIMRows,
+                   int numRequiredPIMCol,
+                   int outOffset)
+{
+  PimObjId accObject = pimAlloc(PIM_ALLOC_AUTO, numRequiredPIMCol, CONV_PIM_TYPE);
+  if (accObject == -1)
+  {
+    std::cout << "Function: " << __func__ << " Abort: pimAlloc failed for accObject" << std::endl;
+    return;
+  }
+
+  PimStatus status = pimBroadcastInt(accObject, 0);
+  if (status != PIM_OK)
+  {
+    std::cout << "Function: " << __func__ << " Abort: pimBroadcastInt failed for accObject" << std::endl;
+    pimFree(accObject);
+    return;
+  }
+
+  PimObjId matrixObject = pimAllocAssociated(accObject, CONV_PIM_TYPE);
+  PimObjId weightObject = pimAllocAssociated(accObject, CONV_PIM_TYPE);
+  if (matrixObject == -1 || weightObject == -1)
+  {
+    std::cout << "Function: " << __func__ << " Abort: pimAllocAssociated failed" << std::endl;
+    if (matrixObject != -1)
+      pimFree(matrixObject);
+    if (weightObject != -1)
+      pimFree(weightObject);
+    pimFree(accObject);
+    return;
+  }
+
+  int col = filter3D[0][0].size();
+  std::vector<ConvHostType> weightRow(numRequiredPIMCol, 0);  // 16-bit weight row (each channel's weight repeated hopSize times)
+  std::vector<ConvHostType> imageRow16(numRequiredPIMCol, 0); // 16-bit copy of one merged im2col row
+
+  for (uint64_t j = 0; j < inputMatrix.size(); j += numRequiredPIMRows)
+  {
+    for (int i = 0; i < numRequiredPIMRows; i++)
+    {
+      // Narrow the int row to ConvHostType, because matrixObject is a CONV_PIM_TYPE object
+      for (int k = 0; k < numRequiredPIMCol; ++k)
+      {
+        imageRow16[k] = static_cast<ConvHostType>(inputMatrix[i + j][k]);
+      }
+
+      status = pimCopyHostToDevice((void *)imageRow16.data(), matrixObject);
+      if (status != PIM_OK)
+      {
+        std::cout << "Function: " << __func__ << " Abort: pimCopyHostToDevice failed for inputMatrix at iteration: " << i << std::endl;
+        pimFree(weightObject);
+        pimFree(matrixObject);
+        pimFree(accObject);
+        return;
+      }
+
+      int kr = i / col;
+      int kc = i % col;
+      for (int ch = 0; ch < numChannelsInChunk; ++ch)
+      {
+        ConvHostType wVal = static_cast<ConvHostType>(filter3D[channelOffset + ch][kr][kc]);
+        std::fill(weightRow.begin() + ch * hopSize, weightRow.begin() + (ch + 1) * hopSize, wVal);
+      }
+
+      status = pimCopyHostToDevice((void *)weightRow.data(), weightObject);
+      if (status != PIM_OK)
+      {
+        std::cout << "Function: " << __func__ << " Abort: pimCopyHostToDevice failed for weightRow at iteration: " << i << std::endl;
+        pimFree(weightObject);
+        pimFree(matrixObject);
+        pimFree(accObject);
+        return;
+      }
+
+      status = pimMul(matrixObject, weightObject, matrixObject);
+      if (status != PIM_OK)
+      {
+        std::cout << "Function: " << __func__ << " Abort: pimMul failed." << std::endl;
+        pimFree(weightObject);
+        pimFree(matrixObject);
+        pimFree(accObject);
+        return;
+      }
+
+      status = pimAdd(matrixObject, accObject, accObject);
+      if (status != PIM_OK)
+      {
+        std::cout << "Function: " << __func__ << " Abort: pimAdd failed." << std::endl;
+        pimFree(weightObject);
+        pimFree(matrixObject);
+        pimFree(accObject);
+        return;
+      }
+    }
+  }
+
+  // Read the 16-bit accumulators back into a 16-bit buffer
+  std::vector<ConvHostType> chunkOut16(numRequiredPIMCol, 0);
+  status = pimCopyDeviceToHost(accObject, chunkOut16.data());
+  if (status != PIM_OK)
+  {
+    std::cout << "Function: " << __func__ << " Abort: pimCopyDeviceToHost failed for accObject" << std::endl;
+    pimFree(weightObject);
+    pimFree(matrixObject);
+    pimFree(accObject);
+    return;
+  }
+
+  // Write this channel chunk's partial sums into the correct slice of outputMatrix (widened back to int)
+  for (int k = 0; k < numRequiredPIMCol; ++k)
+  {
+    outputMatrix[outOffset + k] = chunkOut16[k];
+  }
+
+  pimFree(weightObject);
+  pimFree(matrixObject);
+  pimFree(accObject);
+}
+
+// 4D Baseline Overload: executes convolution between a 3D input matrix [Cin][H][W] and a 4D kernel [Cout][Cin][Hf][Wf]
+// using the baseline PIMeval decomposition + performConv4D + aggregateConv pipeline.
+void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
+           std::vector<std::vector<std::vector<std::vector<int>>>> &kernelMatrix,
+           std::vector<std::vector<std::vector<int>>> &resultMatrix,
+           int stride,
+           int padding)
+{
+  PimDeviceProperties deviceProp;
+  PimStatus status = pimGetDeviceProperties(&deviceProp);
+  if (status != PIM_OK)
+  {
+    std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
+    exit(1);
+  }
+
+  uint64_t numCols = deviceProp.numColPerSubarray;
+  uint64_t numRows = deviceProp.numRowPerSubarray;
+  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) *
+                       uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;
+
+  int inputDepth = inputMatrix.size();
+  int inputHeight = inputMatrix[0].size();
+  int inputWidth = inputMatrix[0][0].size();
+  int kernelDepth = kernelMatrix.size();
+  int kernelHeight = kernelMatrix[0][0].size();
+  int kernelWidth = kernelMatrix[0][0][0].size();
+
+  int outMatRow = ((inputHeight + 2 * padding - kernelHeight) / stride) + 1;
+  int outMatCol = ((inputWidth + 2 * padding - kernelWidth) / stride) + 1;
+  int hopSize = outMatRow * outMatCol;
+
+  // performConv4D allocates 3 objects of CONV_PIM_TYPE (CONV_BITS bits each) of length (numOfMatPerRow * hopSize).
+  // Cap numOfMatPerRow so the 3 conv objects always fit in device memory.
+  uint64_t maxColsPerChunk = std::max<uint64_t>(1, numOfBits / (3ULL * CONV_BITS));
+  int maxMatsInMem = std::max(1, static_cast<int>(maxColsPerChunk / hopSize));
+  int numOfMatPerRow = std::min(inputDepth, maxMatsInMem);
+  int numOfPIMRow = kernelHeight * kernelWidth;
+
+  // Pre-decompose each input channel once per layer so we don't redundantly re-decompose it Cout times on the host
+  std::vector<std::vector<std::vector<int>>> decompPerChannel(inputDepth);
+  for (int k = 0; k < inputDepth; ++k)
+  {
+    // decomposeMatrix() expects an ALREADY padded matrix, so build the zero-padded channel here first
+    std::vector<std::vector<int>> paddedChannel(inputHeight + 2 * padding, std::vector<int>(inputWidth + 2 * padding, 0));
+    for (int r = 0; r < inputHeight; ++r)
+      for (int c = 0; c < inputWidth; ++c)
+        paddedChannel[r + padding][c + padding] = inputMatrix[k][r][c];
+    decomposeMatrix(inputHeight + 2 * padding, inputWidth + 2 * padding, kernelHeight, kernelWidth, stride, 0, paddedChannel, decompPerChannel[k]);
+  }
+
+  resultMatrix.assign(kernelDepth, std::vector<std::vector<int>>(outMatRow, std::vector<int>(outMatCol, 0)));
+
+  for (int i = 0; i < kernelDepth; i++)
+  {
+    std::vector<int> dstVec(hopSize, 0);
+    std::vector<int> outVector(hopSize * inputDepth, 0);
+
+    for (int j = 0; j < inputDepth; j += numOfMatPerRow)
+    {
+      int matChunk = (numOfMatPerRow + j) <= inputDepth ? (numOfMatPerRow + j) : inputDepth;
+      int numChannelsInChunk = matChunk - j;
+
+      std::vector<std::vector<int>> mergedMat(numOfPIMRow);
+      for (int idx = 0; idx < numOfPIMRow; ++idx)
+      {
+        mergedMat[idx].reserve(numChannelsInChunk * hopSize);
+        for (int k = j; k < matChunk; ++k)
+        {
+          mergedMat[idx].insert(mergedMat[idx].end(),
+                                decompPerChannel[k][idx].begin(),
+                                decompPerChannel[k][idx].end());
+        }
+      }
+      int tempcol = mergedMat[0].size();
+      performConv4D(kernelMatrix[i], j, numChannelsInChunk, hopSize,
+                    mergedMat, outVector, numOfPIMRow, tempcol, j * hopSize);
+    }
+
+    aggregateConv(outVector, dstVec, hopSize);
+
+    int ddx = 0;
+    for (int rdx = 0; rdx < outMatRow; ++rdx)
+    {
+      for (int cdx = 0; cdx < outMatCol; ++cdx)
+      {
+        resultMatrix[i][rdx][cdx] = dstVec[ddx++];
+      }
+    }
+  }
 }
 
 // This should work for bitSIMD or any PIM that requires vertical data layout.
@@ -441,14 +700,15 @@ void pool(std::vector<std::vector<std::vector<int>>> &inputMatrix, int kernelHei
 {
   PimDeviceProperties deviceProp;
   PimStatus status = pimGetDeviceProperties(&deviceProp);
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cerr << "Abort: pimGetDeviceProperties failed" << std::endl;
     exit(1);
   }
   // Get the device parameters
   uint64_t numCols = deviceProp.numColPerSubarray;
   uint64_t numRows = deviceProp.numRowPerSubarray;
-  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows; 
+  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) * uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;
 
   uint64_t inputDepth = inputMatrix.size();
   uint64_t inputHeight = inputMatrix[0].size();
@@ -472,10 +732,11 @@ void pool(std::vector<std::vector<std::vector<int>>> &inputMatrix, int kernelHei
       std::vector<std::vector<int>> decompMat;
       decomposeMatrix(inputHeight, inputWidth, kernelHeight, kernelWidth, stride, 0, inputMatrix[j], decompMat);
       // Merge the matrices
-      for (uint64_t idx = 0; idx < mergedMat.size(); idx++) {
+      for (uint64_t idx = 0; idx < mergedMat.size(); idx++)
+      {
         mergedMat[idx].insert(mergedMat[idx].end(),
-                             std::make_move_iterator(decompMat[idx].begin()),
-                             std::make_move_iterator(decompMat[idx].end()));
+                              std::make_move_iterator(decompMat[idx].begin()),
+                              std::make_move_iterator(decompMat[idx].end()));
       }
     }
 
@@ -499,7 +760,7 @@ void pool(std::vector<std::vector<std::vector<int>>> &inputMatrix, int kernelHei
 // Performs General Matrix-Vector Multiplication (GEMV) in PIM
 // The function computes the matrix-vector product of the source matrix and the source vector, and stores the result in the destination vector.
 // The function allocates PIM objects, performs element-wise multiplication, and accumulates the results.
-// The accumulated results are then copied from the PIM (device) to the host. 
+// The accumulated results are then copied from the PIM (device) to the host.
 void gemv(uint64_t row, uint64_t col, std::vector<int> &srcVector, std::vector<std::vector<int>> &srcMatrix, std::vector<int> &dst)
 {
   PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, row, PIM_INT32);
@@ -555,55 +816,61 @@ void gemv(uint64_t row, uint64_t col, std::vector<int> &srcVector, std::vector<s
 // The max results from pimObject are then copied from the PIM (device) to Host.
 void performRelu(std::vector<int> &inputVector)
 {
-  if (inputVector.empty()) {
-    std::cout << "Function: " << __func__ << ", Abort: Input matrix is empty" << std::endl;    
+  if (inputVector.empty())
+  {
+    std::cout << "Function: " << __func__ << ", Abort: Input matrix is empty" << std::endl;
     return;
   }
   int numCols = inputVector.size();
 
   // Initialize reluConst vector with zero for max(0, x) operation.
-  std::vector<int> reluConst(numCols, 0);  
+  std::vector<int> reluConst(numCols, 0);
 
   PimObjId pimObject = pimAlloc(PIM_ALLOC_AUTO, numCols, PIM_INT32);
-  if (pimObject == -1) {
+  if (pimObject == -1)
+  {
     std::cout << "Function: " << __func__ << ", Abort: pimAlloc for PimObj pimObject failed" << std::endl;
     return;
   }
 
   PimObjId RELUConstObj = pimAllocAssociated(pimObject, PIM_INT32);
-  if (RELUConstObj == -1) {
+  if (RELUConstObj == -1)
+  {
     std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated for PimObj RELUConstObj failed" << std::endl;
     return;
   }
 
   PimStatus status = pimCopyHostToDevice((void *)inputVector.data(), pimObject);
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice from inputMatrix to pimObject failed" << std::endl;
     return;
   }
 
   status = pimCopyHostToDevice((void *)reluConst.data(), RELUConstObj);
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice from reluConst to RELUConstObj failed" << std::endl;
     return;
-  }  
+  }
 
   status = pimMax(RELUConstObj, pimObject, pimObject);
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cout << "Function: " << __func__ << ", Abort: pimMax failed between RELUConstObj and pimObject" << std::endl;
     return;
   }
 
   inputVector.resize(numCols);
   status = pimCopyDeviceToHost(pimObject, inputVector.data());
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyDeviceToHost from pimObject to outputMatrix" << std::endl;
     return;
   }
 
   pimFree(pimObject);
   pimFree(RELUConstObj);
-
 }
 
 // Perform the RELU (REctified Linear Unit) operation, max(0, x), a non-linear activation function in PIM for the given 2D input matrix.
@@ -612,14 +879,14 @@ void performRelu(std::vector<int> &inputVector)
 void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<int> &outputMatrix)
 {
   if (inputMatrix.empty())
-  {    
+  {
     std::cout << "Function: " << __func__ << ", Abort: Input matrix is empty" << std::endl;
     return;
   }
   int numRows = inputMatrix.size();
   int numCols = inputMatrix[0].size();
   // Initialize reluConst vector with zero for max(0, x) operation. Initialize with a different value 'y' for max(y, x) operation.
-  std::vector<int> reluConst(numCols, 0);  
+  std::vector<int> reluConst(numCols, 0);
 
   std::vector<PimObjId> pimObjectList(numRows);
   PimObjId obj1 = pimAlloc(PIM_ALLOC_AUTO, numCols, PIM_INT32);
@@ -642,8 +909,8 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
   PimObjId RELUConstObj = pimAllocAssociated(pimObjectList[0], PIM_INT32);
   if (RELUConstObj == -1)
   {
-      std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated for PimObj RELUConstObj failed" << std::endl;
-      return;
+    std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated for PimObj RELUConstObj failed" << std::endl;
+    return;
   }
 
   for (uint64_t i = 0; i < pimObjectList.size(); i++)
@@ -655,12 +922,12 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
       return;
     }
   }
-  PimStatus status = pimCopyHostToDevice((void *) reluConst.data(), RELUConstObj);
+  PimStatus status = pimCopyHostToDevice((void *)reluConst.data(), RELUConstObj);
   if (status != PIM_OK)
   {
-      std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice from reluConst to RELUConstObj failed" << std::endl;
-      return;
-  }  
+    std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice from reluConst to RELUConstObj failed" << std::endl;
+    return;
+  }
 
   for (uint64_t i = 0; i < pimObjectList.size(); i++)
   {
@@ -683,19 +950,20 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
     pimFree(elem);
   }
   pimFree(RELUConstObj);
-
 }
 
 // Function executing RELU for a given 3D input matrix.
 // For each input depth, the input matrix is decomposed based on the kernel dimensions (1x1) and stride (1), merged together.
 // The merged matrix is then passed to performRelu() function to peform RELU on PIM.
 // The result (1D vector) from the PIM is then reconstructed back to a 2D final result matrix for each input depth.
-void relu (std::vector<std::vector<std::vector<int>>> &inputMatrix) {
-  
+void relu(std::vector<std::vector<std::vector<int>>> &inputMatrix)
+{
+
   // Define parameters for processing
   PimDeviceProperties deviceProp;
   PimStatus status = pimGetDeviceProperties(&deviceProp);
-  if (status != PIM_OK) {
+  if (status != PIM_OK)
+  {
     std::cout << "Abort: pimGetDeviceProperties failed" << std::endl;
     exit(1);
   }
@@ -717,27 +985,30 @@ void relu (std::vector<std::vector<std::vector<int>>> &inputMatrix) {
   std::vector<std::vector<int>> mergedMat(numOfPIMRow);
   std::vector<int> outVector;
   outVector.resize(inputDepth * inputHeight * inputWidth);
-  
+
   // Loop through input depth in chunks
-  for (uint64_t j = 0; j < inputDepth; j += numOfMatPerRow) {
+  for (uint64_t j = 0; j < inputDepth; j += numOfMatPerRow)
+  {
     uint64_t matChunk = (numOfMatPerRow + j) <= inputDepth ? (numOfMatPerRow + j) : inputDepth;
     // Decompose and merge matrices
-    for (uint64_t k = j; k < matChunk; k++) {
+    for (uint64_t k = j; k < matChunk; k++)
+    {
       // 1, 1, 1, 0 in the function call below indicates that the kernel dimensions are 1x1, stride is 1 and padding is 0 while decomposing the matrix for ReLU operation.
       // The kernel dimensions, stride and padding are specified in the functional call to make the function reusable for other operations like max pooling.
       decomposeMatrix(inputHeight, inputWidth, 1, 1, 1, 0, inputMatrix[k], decompMat);
-      for (uint64_t idx = 0; idx < mergedMat.size(); idx++) {
+      for (uint64_t idx = 0; idx < mergedMat.size(); idx++)
+      {
         mergedMat[idx].reserve(mergedMat[idx].size() + decompMat[idx].size());
         mergedMat[idx].insert(mergedMat[idx].end(), make_move_iterator(decompMat[idx].begin()), make_move_iterator(decompMat[idx].end()));
       }
     }
   }
-  
+
   performRelu(mergedMat, outVector);
 
   uint64_t idx = 0;
   for (uint64_t i = 0; i < inputDepth; i += 1)
-  {  
+  {
     for (uint64_t r = 0; r < inputHeight; ++r)
     {
       for (uint64_t c = 0; c < inputWidth; ++c)
@@ -745,122 +1016,143 @@ void relu (std::vector<std::vector<std::vector<int>>> &inputMatrix) {
         inputMatrix[i][r][c] = outVector[idx++];
       }
     }
-  } 
-
+  }
 }
 
 // Function to read weights of a specific layer from CSV (for convolutional layers).
-vector<vector<vector<float>>> read_conv_layer_weights_from_csv(const string& filename, const string& layer_name) {
-    ifstream file(filename); // Open the CSV file
-    string line;
-    vector<vector<vector<float>>> kernelMatrix; // Initialize a 3D vector to hold the kernel matrix
+vector<vector<vector<float>>> read_conv_layer_weights_from_csv(const string &filename, const string &layer_name)
+{
+  ifstream file(filename); // Open the CSV file
+  string line;
+  vector<vector<vector<float>>> kernelMatrix; // Initialize a 3D vector to hold the kernel matrix
 
-    while (getline(file, line)) { // Read the file line by line
-        stringstream ss(line);
-        string item;
-        vector<string> items;
+  while (getline(file, line))
+  { // Read the file line by line
+    stringstream ss(line);
+    string item;
+    vector<string> items;
 
-        // Split the line by commas
-        while (getline(ss, item, ',')) {
-            items.push_back(item);
-        }
-
-        // Check if the layer name matches the current line
-        if (items[0] == layer_name) {
-            int num_kernels = stoi(items[1]); // Depth of the kernel matrix (number of kernels)
-            int rows = stoi(items[3]);  // Number of rows in each kernel
-            int cols = stoi(items[4]);  // Number of columns in each kernel
-            kernelMatrix.resize(num_kernels); // Resize the 3D vector to accommodate the kernels
-
-            int idx = 5; // Start index of the actual weights in the CSV line
-            for (int d = 0; d < num_kernels; ++d) { // Loop through each kernel
-                kernelMatrix[d].resize(rows, vector<float>(cols, 0)); // Resize each kernel matrix
-                for (int r = 0; r < rows; ++r) { // Loop through each row
-                    for (int c = 0; c < cols; ++c) { // Loop through each column
-                        kernelMatrix[d][r][c] = std::stof(items[idx++]); // Assign the weight value
-                    }
-                }
-            }
-
-            return kernelMatrix; // Return the kernel matrix for the specified layer
-        }
+    // Split the line by commas
+    while (getline(ss, item, ','))
+    {
+      items.push_back(item);
     }
 
-    throw runtime_error("Layer not found in the CSV file"); // Throw an error if the layer is not found
+    // Check if the layer name matches the current line
+    if (items[0] == layer_name)
+    {
+      int num_kernels = stoi(items[1]); // Depth of the kernel matrix (number of kernels)
+      int rows = stoi(items[3]);        // Number of rows in each kernel
+      int cols = stoi(items[4]);        // Number of columns in each kernel
+      kernelMatrix.resize(num_kernels); // Resize the 3D vector to accommodate the kernels
+
+      int idx = 5; // Start index of the actual weights in the CSV line
+      for (int d = 0; d < num_kernels; ++d)
+      {                                                       // Loop through each kernel
+        kernelMatrix[d].resize(rows, vector<float>(cols, 0)); // Resize each kernel matrix
+        for (int r = 0; r < rows; ++r)
+        { // Loop through each row
+          for (int c = 0; c < cols; ++c)
+          {                                                  // Loop through each column
+            kernelMatrix[d][r][c] = std::stof(items[idx++]); // Assign the weight value
+          }
+        }
+      }
+
+      return kernelMatrix; // Return the kernel matrix for the specified layer
+    }
+  }
+
+  throw runtime_error("Layer not found in the CSV file"); // Throw an error if the layer is not found
 }
 
 // Function to read weights of a specific layer from CSV (for dense layers).
-std::vector<std::vector<float>> read_dense_layer_weights_from_csv(const std::string& filename, const std::string& layer_name) {
-    std::ifstream file(filename); // Open the CSV file
-    std::string line; // Variable to hold each line of the CSV
-    std::vector<std::vector<float>> denseMatrix; // Matrix to store the weights of the dense layer
+std::vector<std::vector<float>> read_dense_layer_weights_from_csv(const std::string &filename, const std::string &layer_name)
+{
+  std::ifstream file(filename);                // Open the CSV file
+  std::string line;                            // Variable to hold each line of the CSV
+  std::vector<std::vector<float>> denseMatrix; // Matrix to store the weights of the dense layer
 
-    while (std::getline(file, line)) {
-        std::stringstream ss(line); // Create a string stream from the line
-        std::string item; // Variable to hold each item in the line
-        std::vector<std::string> items; // Vector to store all items in the line
+  while (std::getline(file, line))
+  {
+    std::stringstream ss(line);     // Create a string stream from the line
+    std::string item;               // Variable to hold each item in the line
+    std::vector<std::string> items; // Vector to store all items in the line
 
-        // Split the line by commas
-        while (std::getline(ss, item, ',')) {
-            items.push_back(item);
-        }
-
-        // Check if the layer name matches the current line
-        if (items[0] == layer_name) {
-            int rows = std::stoi(items[2]); // Number of rows in the dense matrix
-            int cols = std::stoi(items[1]); // Number of columns in the dense matrix
-            denseMatrix.resize(rows, std::vector<float>(cols, 0)); // Resize the matrix to the appropriate dimensions
-
-            int idx = 3; // Start index of the actual weights in the CSV line
-            // Populate the dense matrix with weights
-            for (int r = 0; r < rows; ++r) {
-                for (int c = 0; c < cols; ++c) {
-                    denseMatrix[r][c] = std::stof(items[idx++]); // Convert the string weight to float and store it in the matrix
-                }
-            }
-
-            return denseMatrix;
-        }
+    // Split the line by commas
+    while (std::getline(ss, item, ','))
+    {
+      items.push_back(item);
     }
 
-    throw std::runtime_error("Layer not found in the CSV file"); // Throw an error if the layer name is not found
+    // Check if the layer name matches the current line
+    if (items[0] == layer_name)
+    {
+      int rows = std::stoi(items[2]);                        // Number of rows in the dense matrix
+      int cols = std::stoi(items[1]);                        // Number of columns in the dense matrix
+      denseMatrix.resize(rows, std::vector<float>(cols, 0)); // Resize the matrix to the appropriate dimensions
+
+      int idx = 3; // Start index of the actual weights in the CSV line
+      // Populate the dense matrix with weights
+      for (int r = 0; r < rows; ++r)
+      {
+        for (int c = 0; c < cols; ++c)
+        {
+          denseMatrix[r][c] = std::stof(items[idx++]); // Convert the string weight to float and store it in the matrix
+        }
+      }
+
+      return denseMatrix;
+    }
+  }
+
+  throw std::runtime_error("Layer not found in the CSV file"); // Throw an error if the layer name is not found
 }
 
 // Function to binarize a 3D matrix of floats.
 // Added to binarize the values of kernel matrices of the convolutional layers. May not be needed after adding float support.
-std::vector<std::vector<std::vector<int>>> binarizeMatrix(const std::vector<std::vector<std::vector<float>>>& weights) {
+std::vector<std::vector<std::vector<int>>> binarizeMatrix(const std::vector<std::vector<std::vector<float>>> &weights)
+{
   std::vector<std::vector<std::vector<int>>> binarizedMatrix(weights.size());
-    for (size_t d = 0; d < weights.size(); ++d) {
-      binarizedMatrix[d].resize(weights[d].size());
-      for (size_t r = 0; r < weights[d].size(); ++r) {
-        binarizedMatrix[d][r].resize(weights[d][r].size());
-        for (size_t c = 0; c < weights[d][r].size(); ++c) {
-          binarizedMatrix[d][r][c] = (weights[d][r][c] > 0) ? 1 : 0;
-        }
+  for (size_t d = 0; d < weights.size(); ++d)
+  {
+    binarizedMatrix[d].resize(weights[d].size());
+    for (size_t r = 0; r < weights[d].size(); ++r)
+    {
+      binarizedMatrix[d][r].resize(weights[d][r].size());
+      for (size_t c = 0; c < weights[d][r].size(); ++c)
+      {
+        binarizedMatrix[d][r][c] = (weights[d][r][c] > 0) ? 1 : 0;
       }
     }
+  }
   return binarizedMatrix;
 }
 
 // Function to binarize a 2D matrix of floats.
 // Added to binarize the values of kernel matrices of the dense layers. May not be needed after adding float support.
-std::vector<std::vector<int>> binarizeMatrix(const std::vector<std::vector<float>>& weights) {
+std::vector<std::vector<int>> binarizeMatrix(const std::vector<std::vector<float>> &weights)
+{
   std::vector<std::vector<int>> binarizedMatrix(weights.size());
-    for (size_t r = 0; r < weights.size(); ++r) {
-      binarizedMatrix[r].resize(weights[r].size());
-      for (size_t c = 0; c < weights[r].size(); ++c) {
-        binarizedMatrix[r][c] = (weights[r][c] > 0) ? 1 : 0;
-      }
+  for (size_t r = 0; r < weights.size(); ++r)
+  {
+    binarizedMatrix[r].resize(weights[r].size());
+    for (size_t c = 0; c < weights[r].size(); ++c)
+    {
+      binarizedMatrix[r][c] = (weights[r][c] > 0) ? 1 : 0;
     }
+  }
   return binarizedMatrix;
 }
 
 #ifdef COMPILE_WITH_JPEG
 // Function to read a JPEG image and store its pixel data into inputMatrix.
-void readJPEG(const std::string& filename, std::vector<std::vector<std::vector<int>>>& inputMatrix, int &targetHeight, int &targetWidth) {
+void readJPEG(const std::string &filename, std::vector<std::vector<std::vector<int>>> &inputMatrix, int &targetHeight, int &targetWidth)
+{
   // Open the JPEG file
-  FILE* file = fopen(filename.c_str(), "rb");
-  if (!file) {
+  FILE *file = fopen(filename.c_str(), "rb");
+  if (!file)
+  {
     std::cerr << "Error opening file: " << filename << std::endl;
     return;
   }
@@ -886,7 +1178,7 @@ void readJPEG(const std::string& filename, std::vector<std::vector<std::vector<i
 
   // Allocate memory for storing scanline of decompressed image
   int row_stride = cinfo.output_width * cinfo.output_components;
-  JSAMPARRAY buffer = (*cinfo.mem->alloc_sarray)((j_common_ptr) &cinfo, JPOOL_IMAGE, row_stride, 1);
+  JSAMPARRAY buffer = (*cinfo.mem->alloc_sarray)((j_common_ptr)&cinfo, JPOOL_IMAGE, row_stride, 1);
 
   // Calculate scaling factors
   double scaleX = (double)cinfo.output_width / targetWidth;
@@ -896,15 +1188,20 @@ void readJPEG(const std::string& filename, std::vector<std::vector<std::vector<i
   inputMatrix.resize(3, std::vector<std::vector<int>>(targetHeight, std::vector<int>(targetWidth)));
 
   int row = 0;
-  while (cinfo.output_scanline < cinfo.output_height) {
+  while (cinfo.output_scanline < cinfo.output_height)
+  {
     // Read scanline
     jpeg_read_scanlines(&cinfo, buffer, 1);
-    if (row < targetHeight) {
+    if (row < targetHeight)
+    {
       // Process each pixel in the scanline
-      for (int col = 0; col < targetWidth; ++col) {
+      for (int col = 0; col < targetWidth; ++col)
+      {
         int origX = (int)(col * scaleX);
-        if (origX >= cinfo.output_width) origX = cinfo.output_width - 1;
-        for (int color = 0; color < 3; ++color) {
+        if (origX >= cinfo.output_width)
+          origX = cinfo.output_width - 1;
+        for (int color = 0; color < 3; ++color)
+        {
           inputMatrix[color][row][col] = buffer[0][origX * cinfo.output_components + color];
         }
       }
@@ -922,15 +1219,17 @@ void readJPEG(const std::string& filename, std::vector<std::vector<std::vector<i
 
 // Function to write the resized image data to a JPEG file.
 // Added to verify the correctness of the resized image.
-void writeResizedImage(const std::string& outputFilename, const std::vector<std::vector<std::vector<int>>>& inputMatrix) {
+void writeResizedImage(const std::string &outputFilename, const std::vector<std::vector<std::vector<int>>> &inputMatrix)
+{
   // Get dimensions of the resized image
-  int depth = inputMatrix.size(); // Should be 3 (R, G, B)
-  int height = inputMatrix[0].size(); // Should be 224
+  int depth = inputMatrix.size();       // Should be 3 (R, G, B)
+  int height = inputMatrix[0].size();   // Should be 224
   int width = inputMatrix[0][0].size(); // Should be 224
 
   // Create a JPEG file pointer
-  FILE* outfile = fopen(outputFilename.c_str(), "wb");
-  if (!outfile) {
+  FILE *outfile = fopen(outputFilename.c_str(), "wb");
+  if (!outfile)
+  {
     std::cerr << "Error opening output JPEG file: " << outputFilename << std::endl;
     return;
   }
@@ -961,10 +1260,13 @@ void writeResizedImage(const std::string& outputFilename, const std::vector<std:
   // Write scanlines of image data
   JSAMPROW row_pointer = new JSAMPLE[width * depth]; // Allocate memory for one row
 
-  while (cinfo.next_scanline < cinfo.image_height) {
+  while (cinfo.next_scanline < cinfo.image_height)
+  {
     // Fill row_pointer with RGB pixel values from inputMatrix
-    for (int w = 0; w < width; ++w) {
-      for (int d = 0; d < depth; ++d) {
+    for (int w = 0; w < width; ++w)
+    {
+      for (int d = 0; d < depth; ++d)
+      {
         row_pointer[w * depth + d] = (JSAMPLE)inputMatrix[d][cinfo.next_scanline][w];
       }
     }

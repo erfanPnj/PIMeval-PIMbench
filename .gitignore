@@ -15,3 +15,6 @@ compile_commands.json
 # Editors
 .vscode/
 
+PIMbench/vgg16/results
+
+PIMbench/vgg16/PIM/*.txt
