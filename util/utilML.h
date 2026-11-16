@@ -2,7 +2,7 @@
 //   Default (nothing defined)        : convolution path uses PIM_INT16 / int16_t  (int16 baseline experiment)
 //   Uncomment the next line (or compile with -DBASELINE_CONV_INT32) : convolution path uses PIM_INT32 / int32_t (original baseline)
 // Only performConv4D and aggregateConv follow the switch. ReLU, max pool, GEMV and softmax are always PIM_INT32.
-// #define BASELINE_CONV_INT32
+#define BASELINE_CONV_INT32
 
 // PIMeval Simulator - Application Utilities for Machine Learning Code.
 // The utilies for Conv, MaxPooling, RELU, GEMV are got from their respective cpp files. So, any change in the individual cpp file should also be updated here manually.
@@ -404,13 +404,10 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix, std::vector<
   }
 }
 
-// Perform the 4D convolution operation in PIM for a chunk of input channels [channelOffset .. channelOffset + numChannelsInChunk - 1]
-// of a single 3D filter (filter3D has shape [Cin][Hf][Wf]).
-// The three PIM objects (accumulator, image row, weight row) are CONV_PIM_TYPE, so every host buffer that is
-// copied to / from them is an ConvHostType buffer (PIMeval copies with the element size of the PIM object).
-// The merged rows come in as std::vector<int>; they are narrowed to ConvHostType right before each copy.
-// NOTE: products and sums of 16-bit values can overflow 16 bits. The values wrap around, which is fine for a
-// data-copy / command-count experiment, but the numerical result of the network is not meaningful.
+// Perform the 4D convolution for a chunk of input channels (from channelOffset to channelOffset + numChannelsInChunk - 1)
+// of a single 3D filter slice (filter3D has shape [Cin][Hf][Wf]).
+// For each kernel position and each channel in the chunk, the corresponding weight slice is applied.
+// The partial results are accumulated and written to outputMatrix at outOffset, and aggregateConv() adds the channels later.
 void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
                    int channelOffset,
                    int numChannelsInChunk,
@@ -437,27 +434,20 @@ void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
   }
 
   PimObjId matrixObject = pimAllocAssociated(accObject, CONV_PIM_TYPE);
-  PimObjId weightObject = pimAllocAssociated(accObject, CONV_PIM_TYPE);
-  if (matrixObject == -1 || weightObject == -1)
+  if (matrixObject == -1)
   {
     std::cout << "Function: " << __func__ << " Abort: pimAllocAssociated failed" << std::endl;
-    if (matrixObject != -1)
-      pimFree(matrixObject);
-    if (weightObject != -1)
-      pimFree(weightObject);
     pimFree(accObject);
     return;
   }
 
   int col = filter3D[0][0].size();
-  std::vector<ConvHostType> weightRow(numRequiredPIMCol, 0);  // 16-bit weight row (each channel's weight repeated hopSize times)
-  std::vector<ConvHostType> imageRow16(numRequiredPIMCol, 0); // 16-bit copy of one merged im2col row
+  std::vector<ConvHostType> imageRow16(numRequiredPIMCol, 0); // narrowed copy of one merged im2col row
 
   for (uint64_t j = 0; j < inputMatrix.size(); j += numRequiredPIMRows)
   {
     for (int i = 0; i < numRequiredPIMRows; i++)
     {
-      // Narrow the int row to ConvHostType, because matrixObject is a CONV_PIM_TYPE object
       for (int k = 0; k < numRequiredPIMCol; ++k)
       {
         imageRow16[k] = static_cast<ConvHostType>(inputMatrix[i + j][k]);
@@ -467,7 +457,6 @@ void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
       if (status != PIM_OK)
       {
         std::cout << "Function: " << __func__ << " Abort: pimCopyHostToDevice failed for inputMatrix at iteration: " << i << std::endl;
-        pimFree(weightObject);
         pimFree(matrixObject);
         pimFree(accObject);
         return;
@@ -475,37 +464,13 @@ void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
 
       int kr = i / col;
       int kc = i % col;
-      for (int ch = 0; ch < numChannelsInChunk; ++ch)
-      {
-        ConvHostType wVal = static_cast<ConvHostType>(filter3D[channelOffset + ch][kr][kc]);
-        std::fill(weightRow.begin() + ch * hopSize, weightRow.begin() + (ch + 1) * hopSize, wVal);
-      }
 
-      status = pimCopyHostToDevice((void *)weightRow.data(), weightObject);
+      // numChannelsInChunk is always 1 here, so the weight of this channel and kernel position is the scalar
+      int64_t weightValue = static_cast<int64_t>(filter3D[channelOffset][kr][kc]);
+      status = pimScaledAdd(matrixObject, accObject, accObject, static_cast<uint64_t>(weightValue));
       if (status != PIM_OK)
       {
-        std::cout << "Function: " << __func__ << " Abort: pimCopyHostToDevice failed for weightRow at iteration: " << i << std::endl;
-        pimFree(weightObject);
-        pimFree(matrixObject);
-        pimFree(accObject);
-        return;
-      }
-
-      status = pimMul(matrixObject, weightObject, matrixObject);
-      if (status != PIM_OK)
-      {
-        std::cout << "Function: " << __func__ << " Abort: pimMul failed." << std::endl;
-        pimFree(weightObject);
-        pimFree(matrixObject);
-        pimFree(accObject);
-        return;
-      }
-
-      status = pimAdd(matrixObject, accObject, accObject);
-      if (status != PIM_OK)
-      {
-        std::cout << "Function: " << __func__ << " Abort: pimAdd failed." << std::endl;
-        pimFree(weightObject);
+        std::cout << "Function: " << __func__ << " Abort: pimScaledAdd failed." << std::endl;
         pimFree(matrixObject);
         pimFree(accObject);
         return;
@@ -513,25 +478,21 @@ void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
     }
   }
 
-  // Read the 16-bit accumulators back into a 16-bit buffer
   std::vector<ConvHostType> chunkOut16(numRequiredPIMCol, 0);
   status = pimCopyDeviceToHost(accObject, chunkOut16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << " Abort: pimCopyDeviceToHost failed for accObject" << std::endl;
-    pimFree(weightObject);
     pimFree(matrixObject);
     pimFree(accObject);
     return;
   }
 
-  // Write this channel chunk's partial sums into the correct slice of outputMatrix (widened back to int)
   for (int k = 0; k < numRequiredPIMCol; ++k)
   {
     outputMatrix[outOffset + k] = chunkOut16[k];
   }
 
-  pimFree(weightObject);
   pimFree(matrixObject);
   pimFree(accObject);
 }
@@ -552,11 +513,6 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
     exit(1);
   }
 
-  uint64_t numCols = deviceProp.numColPerSubarray;
-  uint64_t numRows = deviceProp.numRowPerSubarray;
-  uint64_t numOfBits = uint64_t(deviceProp.numRanks) * uint64_t(deviceProp.numBankPerRank) *
-                       uint64_t(deviceProp.numSubarrayPerBank) * numCols * numRows;
-
   int inputDepth = inputMatrix.size();
   int inputHeight = inputMatrix[0].size();
   int inputWidth = inputMatrix[0][0].size();
@@ -568,18 +524,15 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
   int outMatCol = ((inputWidth + 2 * padding - kernelWidth) / stride) + 1;
   int hopSize = outMatRow * outMatCol;
 
-  // performConv4D allocates 3 objects of CONV_PIM_TYPE (CONV_BITS bits each) of length (numOfMatPerRow * hopSize).
-  // Cap numOfMatPerRow so the 3 conv objects always fit in device memory.
-  uint64_t maxColsPerChunk = std::max<uint64_t>(1, numOfBits / (3ULL * CONV_BITS));
-  int maxMatsInMem = std::max(1, static_cast<int>(maxColsPerChunk / hopSize));
-  int numOfMatPerRow = std::min(inputDepth, maxMatsInMem);
+  // pimScaledAdd uses ONE scalar for the whole PIM object, but every channel has its own weight.
+  // So each chunk must contain exactly one channel.
+  int numOfMatPerRow = 1;
   int numOfPIMRow = kernelHeight * kernelWidth;
 
-  // Pre-decompose each input channel once per layer so we don't redundantly re-decompose it Cout times on the host
+  // Pre-decompose each input channel once per layer
   std::vector<std::vector<std::vector<int>>> decompPerChannel(inputDepth);
   for (int k = 0; k < inputDepth; ++k)
   {
-    // decomposeMatrix() expects an ALREADY padded matrix, so build the zero-padded channel here first
     std::vector<std::vector<int>> paddedChannel(inputHeight + 2 * padding, std::vector<int>(inputWidth + 2 * padding, 0));
     for (int r = 0; r < inputHeight; ++r)
       for (int c = 0; c < inputWidth; ++c)
