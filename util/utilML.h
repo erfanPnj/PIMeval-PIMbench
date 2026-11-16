@@ -973,6 +973,47 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
   conv2ONCNN(inputMatrix, kernelDepth, kernelHeight, kernelWidth, accessor, resultMatrix, stride, padding);
 }
 
+// Execute an FC (Dense) layer on the ON-CNN PE grid by treating GEMV(row, col)
+// as a 1x1 convolution with Cin = col, Cout = row, H = W = 1, and 1 active PE column.
+// Note: in PIMeval's gemv(row, col, srcVector, srcMatrix, dst),
+//       srcVector has length `col` (inputs) and srcMatrix has shape [col][row].
+void gemvONCNN(uint64_t row, uint64_t col,
+               const std::vector<int> &srcVector,
+               const std::vector<std::vector<int>> &srcMatrix,
+               std::vector<int> &dst)
+{
+  // Reshape 1D input [col] -> 3D IFM [Cin = col][H = 1][W = 1]
+  std::vector<std::vector<std::vector<int>>> ifm3D(
+      col, std::vector<std::vector<int>>(1, std::vector<int>(1, 0)));
+  for (uint64_t c = 0; c < col; ++c)
+  {
+    ifm3D[c][0][0] = srcVector[c];
+  }
+
+  // Reshape 2D weight matrix [col][row] -> 4D kernel [Cout = row][Cin = col][Hf = 1][Wf = 1]
+  std::vector<std::vector<std::vector<std::vector<int>>>> kernel4D(
+      row, std::vector<std::vector<std::vector<int>>>(
+               col, std::vector<std::vector<int>>(1, std::vector<int>(1, 0))));
+  for (uint64_t c = 0; c < col; ++c)
+  {
+    for (uint64_t r = 0; r < row; ++r)
+    {
+      kernel4D[r][c][0][0] = srcMatrix[c][r];
+    }
+  }
+
+  // Run on ON-CNN PEs (uses windowColumn = 0 across 256 filterRows per pass)
+  std::vector<std::vector<std::vector<int>>> result3D;
+  conv2(ifm3D, kernel4D, result3D, /*stride=*/1, /*padding=*/0);
+
+  // Unpack 3D output [row][1][1] -> 1D dst [row]
+  dst.resize(row);
+  for (uint64_t r = 0; r < row; ++r)
+  {
+    dst[r] = result3D[r][0][0];
+  }
+}
+
 // This should work for bitSIMD or any PIM that requires vertical data layout.
 // Perform the Max Pool operation in PIM for the given input matrix.
 // The function allocates the necessary PIM objects, copies the data from host to PIM, and performs Max operation.
