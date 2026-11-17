@@ -476,12 +476,28 @@ struct OncnnKernelAccessor
 {
   const std::vector<std::vector<std::vector<int>>> *kernel3D = nullptr;
   const std::vector<std::vector<std::vector<std::vector<int>>>> *kernel4D = nullptr;
+  std::vector<std::vector<int>> *dense2D = nullptr;
   bool is4D = false;
+  bool isFC = false;
 };
 
 // Simple function to fetch a weight value from either the 4D or 3D kernel matrix
 inline int oncnnGetWeight(const OncnnKernelAccessor &kernel, int filt, int ch, int kr, int kc)
 {
+  if (kernel.isFC && kernel.dense2D != nullptr)
+  {
+    const auto &mat = *kernel.dense2D;
+    // Handle both [col][row] (gemv layout) and [row][col] (CSV layout) safely
+    if ((size_t)ch < mat.size() && (size_t)filt < mat[ch].size())
+    {
+      return mat[ch][filt];
+    }
+    else if ((size_t)filt < mat.size() && (size_t)ch < mat[filt].size())
+    {
+      return mat[filt][ch];
+    }
+    return 0;
+  }
   if (kernel.is4D)
   {
     return (*kernel.kernel4D)[filt][ch][kr][kc];
@@ -622,6 +638,93 @@ inline int oncnnRequantize(std::vector<std::vector<std::vector<int>>> &x)
   return shift;
 }
 
+// 2D overload of oncnnRequantize for FC / Dense weight matrices
+inline int oncnnRequantize2D(std::vector<std::vector<int>> &x)
+{
+  std::vector<int> mags;
+  for (const auto &row : x)
+    for (int v : row)
+      if (v != 0)
+        mags.push_back(v < 0 ? -v : v);
+  if (mags.empty())
+    return 0;
+
+  const char *pe = std::getenv("ONCNN_CALIB_PCT");
+  const double pct = (pe && *pe) ? std::atof(pe) : 0.9999;
+  const size_t k = std::min(mags.size() - 1, (size_t)(pct * mags.size()));
+  std::nth_element(mags.begin(), mags.begin() + k, mags.end());
+  const int ref = mags[k];
+  int shift = 0;
+  while ((ref >> shift) > INT16_MAX)
+    ++shift;
+
+  if (shift > 0)
+  {
+    const int64_t half = int64_t(1) << (shift - 1);
+    for (auto &row : x)
+      for (int &v : row)
+      {
+        const int64_t a = v < 0 ? -(int64_t)v : v;
+        int64_t q = (a + half) >> shift;
+        if (q > INT16_MAX)
+          q = INT16_MAX;
+        v = (int)(v < 0 ? -q : q);
+      }
+  }
+  return shift;
+}
+
+// Percentile-calibrated, round-to-nearest, saturating requantization from int64 accumulator to int32 output
+inline int oncnnRequantize64To32(std::vector<std::vector<std::vector<int64_t>>> &x)
+{
+  std::vector<int64_t> mags; // |v| of non-zero 64-bit accumulated outputs
+  for (const auto &ch : x)
+    for (const auto &row : ch)
+      for (int64_t v : row)
+        if (v != 0)
+          mags.push_back(v < 0 ? -v : v);
+  if (mags.empty())
+    return 0;
+
+  const char *pe = std::getenv("ONCNN_CALIB_PCT");
+  const double pct = (pe && *pe) ? std::atof(pe) : 0.9999;
+  const size_t k = std::min(mags.size() - 1, (size_t)(pct * mags.size()));
+  std::nth_element(mags.begin(), mags.begin() + k, mags.end());
+  const int64_t ref = mags[k];
+  int shift = 0;
+  while ((ref >> shift) > INT32_MAX)
+    ++shift;
+
+  if (shift > 0)
+  {
+    const int64_t half = int64_t(1) << (shift - 1);
+    for (auto &ch : x)
+      for (auto &row : ch)
+        for (int64_t &v : row)
+        {
+          const int64_t a = v < 0 ? -v : v;
+          int64_t q = (a + half) >> shift; // round to nearest
+          if (q > INT32_MAX)
+            q = INT32_MAX; // saturate to int32
+          v = (v < 0 ? -q : q);
+        }
+  }
+  else
+  {
+    // Even if the 99.99th percentile fits in int32, saturate any extreme outlier above the percentile
+    for (auto &ch : x)
+      for (auto &row : ch)
+        for (int64_t &v : row)
+        {
+          if (v > INT32_MAX)
+            v = INT32_MAX;
+          else if (v < INT32_MIN)
+            v = INT32_MIN;
+        }
+  }
+  return shift;
+}
+
 // Core ON-CNN convolution (Algorithm 3 / Eq. 6 / Eq. 10).
 // Steps: requantize -> make the layer plan -> allocate PIM objects -> filter blocks -> window blocks -> tiles.
 void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
@@ -633,6 +736,14 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   const int shift = oncnnRequantize(inputMatrix);
   if (shift > 0 && std::getenv("ONCNN_VERBOSE"))
     std::cout << "ON-CNN: activations right-shifted by " << shift << " to fit 16 bits" << std::endl;
+
+  // If this is an FC layer, requantize the 2D weight matrix directly in-place
+  if (kernelAccessor.isFC && kernelAccessor.dense2D != nullptr)
+  {
+    const int wShift = oncnnRequantize2D(*kernelAccessor.dense2D);
+    if (wShift > 0 && std::getenv("ONCNN_VERBOSE"))
+      std::cout << "ON-CNN: FC weights right-shifted by " << wShift << " to fit 16 bits" << std::endl;
+  }
 
   PimDeviceProperties deviceProp;
   if (pimGetDeviceProperties(&deviceProp) != PIM_OK)
@@ -670,6 +781,8 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
 
   resultMatrix.assign(plan.kernelDepth,
                       std::vector<std::vector<int>>(plan.outputHeight, std::vector<int>(plan.outputWidth, 0)));
+  std::vector<std::vector<std::vector<int64_t>>> resultMatrix64(
+      plan.kernelDepth, std::vector<std::vector<int64_t>>(plan.outputHeight, std::vector<int64_t>(plan.outputWidth, 0)));
 
   // ---------------------------------------------------------------------------------------------
   // Three PIM objects for the whole layer. Each one has one slot of 16 values for EVERY PE:
@@ -895,12 +1008,7 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
             break; // idle PE columns
           }
           const int64_t value = accHost[filterRow * C + windowColumn];
-          if (value < INT32_MIN || value > INT32_MAX)
-          {
-            ++overflowCount;
-            worstOverflowValue = value;
-          }
-          resultMatrix[filterIndex][windowIndex / plan.outputWidth][windowIndex % plan.outputWidth] = static_cast<int>(value);
+          resultMatrix64[filterIndex][windowIndex / plan.outputWidth][windowIndex % plan.outputWidth] = value;
         }
       }
     } // end of the f loop
@@ -909,6 +1017,29 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   pimFree(ifmVector);
   pimFree(filterVector);
   pimFree(accVector);
+
+  // If this is an FC layer, requantize the 64-bit accumulated outputs to 32-bit int
+  if (kernelAccessor.isFC)
+  {
+    oncnnRequantize64To32(resultMatrix64);
+  }
+
+  for (int filt = 0; filt < plan.kernelDepth; ++filt)
+  {
+    for (int r = 0; r < plan.outputHeight; ++r)
+    {
+      for (int c = 0; c < plan.outputWidth; ++c)
+      {
+        const int64_t value = resultMatrix64[filt][r][c];
+        if (value < INT32_MIN || value > INT32_MAX)
+        {
+          ++overflowCount;
+          worstOverflowValue = value;
+        }
+        resultMatrix[filt][r][c] = static_cast<int>(value);
+      }
+    }
+  }
 
   // The accumulators are 64 bit, the result matrix holds int. Report values that do not fit.
   if (overflowCount > 0)
@@ -979,32 +1110,25 @@ void conv2(std::vector<std::vector<std::vector<int>>> &inputMatrix,
 //       srcVector has length `col` (inputs) and srcMatrix has shape [col][row].
 void gemvONCNN(uint64_t row, uint64_t col,
                const std::vector<int> &srcVector,
-               const std::vector<std::vector<int>> &srcMatrix,
+               std::vector<std::vector<int>> &srcMatrix,
                std::vector<int> &dst)
 {
   // Reshape 1D input [col] -> 3D IFM [Cin = col][H = 1][W = 1]
   std::vector<std::vector<std::vector<int>>> ifm3D(
       col, std::vector<std::vector<int>>(1, std::vector<int>(1, 0)));
-  for (uint64_t c = 0; c < col; ++c)
+  for (uint64_t c = 0; c < col && c < srcVector.size(); ++c)
   {
     ifm3D[c][0][0] = srcVector[c];
   }
 
-  // Reshape 2D weight matrix [col][row] -> 4D kernel [Cout = row][Cin = col][Hf = 1][Wf = 1]
-  std::vector<std::vector<std::vector<std::vector<int>>>> kernel4D(
-      row, std::vector<std::vector<std::vector<int>>>(
-               col, std::vector<std::vector<int>>(1, std::vector<int>(1, 0))));
-  for (uint64_t c = 0; c < col; ++c)
-  {
-    for (uint64_t r = 0; r < row; ++r)
-    {
-      kernel4D[r][c][0][0] = srcMatrix[c][r];
-    }
-  }
+  // Pass the 2D matrix directly via the accessor and flip the isFC switch
+  OncnnKernelAccessor accessor;
+  accessor.dense2D = &srcMatrix;
+  accessor.isFC = true;
 
   // Run on ON-CNN PEs (uses windowColumn = 0 across 256 filterRows per pass)
   std::vector<std::vector<std::vector<int>>> result3D;
-  conv2(ifm3D, kernel4D, result3D, /*stride=*/1, /*padding=*/0);
+  conv2ONCNN(ifm3D, (int)row, 1, 1, accessor, result3D, /*stride=*/1, /*padding=*/0);
 
   // Unpack 3D output [row][1][1] -> 1D dst [row]
   dst.resize(row);
