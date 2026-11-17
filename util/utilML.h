@@ -725,6 +725,90 @@ inline int oncnnRequantize64To32(std::vector<std::vector<std::vector<int64_t>>> 
   return shift;
 }
 
+// Tracks exact useful vs. idle-PE zero bytes transferred in H2D and D2H across all ON-CNN layers.
+// Automatically prints a full verification summary at program exit.
+struct OncnnIdleTrafficLogger
+{
+  int layerCallCount = 0;
+
+  // Cumulative grand totals across all ON-CNN layers (Conv + FC)
+  uint64_t totalUsefulH2D = 0;
+  uint64_t totalIdlePeH2D = 0;   // From idle PEs (ifm + filter + accZeros reset)
+  uint64_t totalTailLaneH2D = 0; // From active PEs when position >= windowLength
+  uint64_t totalUsefulD2H = 0;
+  uint64_t totalIdlePeD2H = 0; // From idle PEs during accVector readback
+
+  void recordLayer(bool isFC, int Cin, int Cout, int Hout, int Wout,
+                   uint64_t layerUsefulIfmFiltH2D,
+                   uint64_t layerIdlePeIfmFiltH2D,
+                   uint64_t layerTailLaneIfmFiltH2D,
+                   uint64_t layerUsefulAccResetH2D,
+                   uint64_t layerIdlePeAccResetH2D,
+                   uint64_t layerUsefulAccReadD2H,
+                   uint64_t layerIdlePeAccReadD2H)
+  {
+    ++layerCallCount;
+    const uint64_t layerUsefulH2D = layerUsefulIfmFiltH2D + layerUsefulAccResetH2D;
+    const uint64_t layerIdleAllH2D = layerIdlePeIfmFiltH2D + layerTailLaneIfmFiltH2D + layerIdlePeAccResetH2D;
+    const uint64_t layerTotalH2D = layerUsefulH2D + layerIdleAllH2D;
+    const uint64_t layerTotalD2H = layerUsefulAccReadD2H + layerIdlePeAccReadD2H;
+
+    totalUsefulH2D += layerUsefulH2D;
+    totalIdlePeH2D += (layerIdlePeIfmFiltH2D + layerIdlePeAccResetH2D);
+    totalTailLaneH2D += layerTailLaneIfmFiltH2D;
+    totalUsefulD2H += layerUsefulAccReadD2H;
+    totalIdlePeD2H += layerIdlePeAccReadD2H;
+
+    const double h2dIdlePct = layerTotalH2D ? (100.0 * layerIdleAllH2D / layerTotalH2D) : 0.0;
+    const double d2hIdlePct = layerTotalD2H ? (100.0 * layerIdlePeAccReadD2H / layerTotalD2H) : 0.0;
+
+    std::cout << "[IDLE_TRAFFIC_LOG] Layer #" << std::setw(2) << layerCallCount
+              << (isFC ? " (FC  )" : " (CONV)")
+              << " [Cin=" << std::setw(5) << Cin << ", Cout=" << std::setw(4) << Cout
+              << ", Out=" << Hout << "x" << Wout << "]"
+              << " | H2D Useful=" << std::setw(12) << layerUsefulH2D << " B"
+              << ", H2D IdleZero=" << std::setw(12) << layerIdleAllH2D << " B"
+              << " (IdlePE=" << layerIdlePeIfmFiltH2D + layerIdlePeAccResetH2D
+              << " B, TailLane=" << layerTailLaneIfmFiltH2D << " B | "
+              << std::fixed << std::setprecision(2) << h2dIdlePct << "%)"
+              << " | D2H Useful=" << std::setw(9) << layerUsefulAccReadD2H << " B"
+              << ", D2H IdleZero=" << std::setw(9) << layerIdlePeAccReadD2H << " B ("
+              << d2hIdlePct << "%)" << std::endl;
+  }
+
+  ~OncnnIdleTrafficLogger()
+  {
+    if (layerCallCount == 0)
+      return;
+    const uint64_t grandIdleAllH2D = totalIdlePeH2D + totalTailLaneH2D;
+    const uint64_t grandTotalH2D = totalUsefulH2D + grandIdleAllH2D;
+    const uint64_t grandTotalD2H = totalUsefulD2H + totalIdlePeD2H;
+
+    std::cout << "\n==================== ON-CNN IDLE PE ZERO TRAFFIC SUMMARY ====================\n"
+              << "Total ON-CNN Layers Executed        : " << layerCallCount << "\n"
+              << "ON-CNN Total H2D Bytes              : " << grandTotalH2D << " B\n"
+              << "  -> Useful H2D Bytes               : " << totalUsefulH2D << " B ("
+              << std::fixed << std::setprecision(2) << (100.0 * totalUsefulH2D / grandTotalH2D) << "%)\n"
+              << "  -> Total Zero-Padding H2D Bytes   : " << grandIdleAllH2D << " B ("
+              << (100.0 * grandIdleAllH2D / grandTotalH2D) << "%)\n"
+              << "       * Pure Idle-PE H2D Zeros     : " << totalIdlePeH2D << " B\n"
+              << "       * Tail-Lane Chunk H2D Zeros  : " << totalTailLaneH2D << " B\n"
+              << "ON-CNN Total D2H Bytes (accVector)  : " << grandTotalD2H << " B\n"
+              << "  -> Useful D2H Bytes               : " << totalUsefulD2H << " B ("
+              << (100.0 * totalUsefulD2H / grandTotalD2H) << "%)\n"
+              << "  -> Idle-PE Zero D2H Bytes         : " << totalIdlePeD2H << " B ("
+              << (100.0 * totalIdlePeD2H / grandTotalD2H) << "%)\n"
+              << "=============================================================================\n"
+              << std::endl;
+  }
+};
+
+inline OncnnIdleTrafficLogger &oncnnGetTrafficLogger()
+{
+  static OncnnIdleTrafficLogger logger;
+  return logger;
+}
+
 // Core ON-CNN convolution (Algorithm 3 / Eq. 6 / Eq. 10).
 // Steps: requantize -> make the layer plan -> allocate PIM objects -> filter blocks -> window blocks -> tiles.
 void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
@@ -889,12 +973,27 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   //         OUT[f][w] += IN[c] * W[f][c]
   // ---------------------------------------------------------------------------------------------
 
+  // Per-layer byte counters for useful vs. idle-PE zero transfers
+  uint64_t layerUsefulIfmFiltH2D = 0;
+  uint64_t layerIdlePeIfmFiltH2D = 0;
+  uint64_t layerTailLaneIfmFiltH2D = 0;
+  uint64_t layerUsefulAccResetH2D = 0;
+  uint64_t layerIdlePeAccResetH2D = 0;
+  uint64_t layerUsefulAccReadD2H = 0;
+  uint64_t layerIdlePeAccReadD2H = 0;
+
   // w = number of the FIRST IFM window of the current window block (the block holds windows w .. w+C-1)
   for (int w = 0; w < totalWindows; w += C)
   {
     // f = number of the FIRST filter of the current filter block (the block holds filters f .. f+R-1)
     for (int f = 0; f < Cout; f += R)
     {
+      // Count active vs. idle PEs in this (window block, filter block) pass
+      const int activeRowsInPass = std::max(0, std::min(R, Cout - f));
+      const int activeColsInPass = std::max(0, std::min(C, totalWindows - w));
+      const uint64_t activePEsInPass = (uint64_t)activeRowsInPass * (uint64_t)activeColsInPass;
+      const uint64_t idlePEsInPass = (uint64_t)plan.gridPEs - activePEsInPass;
+
       // Start of one (window block, filter block) pair: all 4096 PEs begin with an accumulator of 0.
       // Each PE will sum up, chunk after chunk, ONE output value OUT[filter][window].
       if (pimCopyHostToDevice((void *)accZeros.data(), accVector, 0, plan.gridPEs) != PIM_OK)
@@ -905,6 +1004,8 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
         pimFree(accVector);
         return;
       }
+      layerUsefulAccResetH2D += activePEsInPass * sizeof(int64_t);
+      layerIdlePeAccResetH2D += idlePEsInPass * sizeof(int64_t);
 
       // c = position in the flattened window of the FIRST value of the current chunk.
       // One iteration = one chunk of M = 16 values = one MAC run of every PE.
@@ -924,6 +1025,7 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
           {
             const int windowIndex = w + windowColumn;
             const int pe = filterRow * C + windowColumn;
+            const bool isPeActive = (windowIndex < totalWindows) && (filterIndex < Cout);
 
             for (int lane = 0; lane < M; ++lane)
             {
@@ -943,6 +1045,21 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
               }
               ifmHost[(size_t)pe * M + lane] = ifmValue;
               filterHost[(size_t)pe * M + lane] = filterValue;
+
+              // Each lane transfers 2 bytes for ifmVector + 2 bytes for filterVector = 4 bytes H2D
+              constexpr uint64_t kBytesPerLanePair = 2 * sizeof(int16_t);
+              if (!isPeActive)
+              {
+                layerIdlePeIfmFiltH2D += kBytesPerLanePair;
+              }
+              else if (position >= windowLength)
+              {
+                layerTailLaneIfmFiltH2D += kBytesPerLanePair;
+              }
+              else
+              {
+                layerUsefulIfmFiltH2D += kBytesPerLanePair;
+              }
             }
           }
         }
@@ -993,6 +1110,9 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
         pimFree(accVector);
         return;
       }
+      layerUsefulAccReadD2H += activePEsInPass * sizeof(int64_t);
+      layerIdlePeAccReadD2H += idlePEsInPass * sizeof(int64_t);
+
       for (int filterRow = 0; filterRow < R; ++filterRow)
       {
         const int filterIndex = f + filterRow;
@@ -1017,6 +1137,13 @@ void conv2ONCNN(const std::vector<std::vector<std::vector<int>>> &inputMatrixIn,
   pimFree(ifmVector);
   pimFree(filterVector);
   pimFree(accVector);
+
+  // Record this layer's useful vs. idle-PE zero traffic in the logger
+  oncnnGetTrafficLogger().recordLayer(
+      kernelAccessor.isFC, Cin, Cout, plan.outputHeight, plan.outputWidth,
+      layerUsefulIfmFiltH2D, layerIdlePeIfmFiltH2D, layerTailLaneIfmFiltH2D,
+      layerUsefulAccResetH2D, layerIdlePeAccResetH2D,
+      layerUsefulAccReadD2H, layerIdlePeAccReadD2H);
 
   // If this is an FC layer, requantize the 64-bit accumulated outputs to 32-bit int
   if (kernelAccessor.isFC)
