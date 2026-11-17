@@ -805,7 +805,7 @@ int main(int argc, char *argv[])
         std::cout << "Weight matrix dimensions: ";
         printMatrixDimensions(denseWeight);
     }
-    gemv(4096, 25088, flattenedMat, denseWeight, denseOutput1);
+    gemvONCNN(4096, 25088, flattenedMat, denseWeight, denseOutput1);
     std::cout << "........ending dense1........\n";
 
     // RELU
@@ -840,7 +840,7 @@ int main(int argc, char *argv[])
         std::cout << "Weight matrix dimensions: ";
         printMatrixDimensions(denseWeight);
     }
-    gemv(4096, 4096, denseOutput1, denseWeight, denseOutput2);
+    gemvONCNN(4096, 4096, denseOutput1, denseWeight, denseOutput2);
     std::cout << "........ending dense2........\n";
 
     // RELU
@@ -875,7 +875,7 @@ int main(int argc, char *argv[])
         std::cout << "Weight matrix dimensions: ";
         printMatrixDimensions(denseWeight);
     }
-    gemv(1000, 4096, denseOutput2, denseWeight, denseOutput3);
+    gemvONCNN(1000, 4096, denseOutput2, denseWeight, denseOutput3);
     std::cout << "........ending dense3........\n";
 
     // perform softmax in host
