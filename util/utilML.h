@@ -2,7 +2,7 @@
 //   Default (nothing defined)        : convolution path uses PIM_INT16 / int16_t  (int16 baseline experiment)
 //   Uncomment the next line (or compile with -DBASELINE_CONV_INT32) : convolution path uses PIM_INT32 / int32_t (original baseline)
 // Only performConv4D and aggregateConv follow the switch. ReLU, max pool, GEMV and softmax are always PIM_INT32.
-#define BASELINE_CONV_INT32
+// #define BASELINE_CONV_INT32
 
 // PIMeval Simulator - Application Utilities for Machine Learning Code.
 // The utilies for Conv, MaxPooling, RELU, GEMV are got from their respective cpp files. So, any change in the individual cpp file should also be updated here manually.
@@ -79,21 +79,27 @@ void decomposeMatrix(int matrixRow, int matrixColumn, int kernelHeight, int kern
 void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
 {
   uint64_t vectorLength = src.size();
-  PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, vectorLength, PIM_INT32);
+  PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, vectorLength, CONV_PIM_TYPE);
   if (srcObj == -1)
   {
     std::cout << "Function: " << __func__ << "Abort: pimAlloc failed for obj" << std::endl;
     return;
   }
 
-  PimStatus status = pimCopyHostToDevice((void *)src.data(), srcObj);
+  std::vector<ConvHostType> src16(vectorLength);
+  for (size_t i = 0; i < vectorLength; ++i)
+  {
+    src16[i] = static_cast<ConvHostType>(src[i]);
+  }
+
+  PimStatus status = pimCopyHostToDevice((void *)src16.data(), srcObj);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for src vector" << std::endl;
     return;
   }
 
-  int32_t max = std::numeric_limits<int32_t>::lowest();
+  ConvHostType max = std::numeric_limits<ConvHostType>::lowest();
   status = pimRedMax(srcObj, &max);
   if (status != PIM_OK)
   {
@@ -108,8 +114,8 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
     return;
   }
 
-  dst.resize(vectorLength);
-  status = pimCopyDeviceToHost(srcObj, (void *)dst.data());
+  std::vector<ConvHostType> dst16(vectorLength);
+  status = pimCopyDeviceToHost(srcObj, (void *)dst16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for dst vector" << std::endl;
@@ -120,12 +126,12 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
 #pragma omp parallel for
   for (size_t i = 0; i < vectorLength; ++i)
   {
-    dst[i] = std::exp(static_cast<double>(dst[i]));
+    dst16[i] = static_cast<ConvHostType>(std::exp(static_cast<double>(dst16[i])));
   }
   auto end = std::chrono::high_resolution_clock::now();
   hostElapsedTime += (end - start);
 
-  status = pimCopyHostToDevice((void *)dst.data(), srcObj);
+  status = pimCopyHostToDevice((void *)dst16.data(), srcObj);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for dst vector" << std::endl;
@@ -147,11 +153,17 @@ void softMaxPIM(const std::vector<int> src, std::vector<int> &dst)
     return;
   }
 
-  status = pimCopyDeviceToHost(srcObj, (void *)dst.data());
+  status = pimCopyDeviceToHost(srcObj, (void *)dst16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed for dst vector" << std::endl;
     return;
+  }
+
+  dst.resize(vectorLength);
+  for (size_t i = 0; i < vectorLength; ++i)
+  {
+    dst[i] = dst16[i];
   }
 
   pimFree(srcObj);
@@ -205,21 +217,27 @@ void softmaxOnHost(const std::vector<T> &input, std::vector<double> &output)
 void performConv(std::vector<std::vector<int>> &filterMatrix, std::vector<std::vector<int>> &inputMatrix, std::vector<int> &outputMatrix, int numRequiredPIMRows, int numRequiredPIMCol)
 {
   std::vector<int> temp;
-  PimObjId filterObject = pimAlloc(PIM_ALLOC_AUTO, numRequiredPIMCol, PIM_INT32);
+  PimObjId filterObject = pimAlloc(PIM_ALLOC_AUTO, numRequiredPIMCol, CONV_PIM_TYPE);
   if (filterObject == -1)
   {
     std::cout << "Function: " << __func__ << "Abort: pimAlloc failed for obj1" << std::endl;
     return;
   }
 
-  PimStatus status = pimCopyHostToDevice((void *)outputMatrix.data(), filterObject);
+  std::vector<ConvHostType> outRow16(numRequiredPIMCol, 0);
+  for (int k = 0; k < numRequiredPIMCol && k < static_cast<int>(outputMatrix.size()); ++k)
+  {
+    outRow16[k] = static_cast<ConvHostType>(outputMatrix[k]);
+  }
+
+  PimStatus status = pimCopyHostToDevice((void *)outRow16.data(), filterObject);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed between filterObjects and outputMatrix at i=" << std::endl;
     return;
   }
 
-  PimObjId matrixObject = pimAllocAssociated(filterObject, PIM_INT32);
+  PimObjId matrixObject = pimAllocAssociated(filterObject, CONV_PIM_TYPE);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimAllocAssociated failed for matrix obj = " << matrixObject << std::endl;
@@ -227,11 +245,17 @@ void performConv(std::vector<std::vector<int>> &filterMatrix, std::vector<std::v
   }
 
   int col = filterMatrix[0].size();
+  std::vector<ConvHostType> imageRow16(numRequiredPIMCol, 0);
   for (uint64_t j = 0; j < inputMatrix.size(); j += numRequiredPIMRows)
   {
     for (int i = 0; i < numRequiredPIMRows; i++)
     {
-      status = pimCopyHostToDevice((void *)inputMatrix[i + j].data(), matrixObject);
+      for (int k = 0; k < numRequiredPIMCol; ++k)
+      {
+        imageRow16[k] = static_cast<ConvHostType>(inputMatrix[i + j][k]);
+      }
+
+      status = pimCopyHostToDevice((void *)imageRow16.data(), matrixObject);
       if (status != PIM_OK)
       {
         std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice from inputMatrix to matrixObjects at iteration: " << i << std::endl;
@@ -249,11 +273,16 @@ void performConv(std::vector<std::vector<int>> &filterMatrix, std::vector<std::v
 
   outputMatrix.resize(numRequiredPIMCol);
 
-  status = pimCopyDeviceToHost(filterObject, outputMatrix.data());
+  status = pimCopyDeviceToHost(filterObject, outRow16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyDeviceToHost failed between filterObjects[0] and outputMatrix" << std::endl;
     return;
+  }
+
+  for (int k = 0; k < numRequiredPIMCol; ++k)
+  {
+    outputMatrix[k] = outRow16[k];
   }
 
   pimFree(filterObject);
@@ -595,7 +624,7 @@ void maxPool(const std::vector<std::vector<int>> &inputMatrix, std::vector<int> 
   int numCols = inputMatrix[0].size();
 
   std::vector<PimObjId> pimObjectList(numRows);
-  PimObjId obj1 = pimAlloc(PIM_ALLOC_AUTO, numCols, PIM_INT32);
+  PimObjId obj1 = pimAlloc(PIM_ALLOC_AUTO, numCols, CONV_PIM_TYPE);
   if (obj1 == -1)
   {
     std::cout << "Function: " << __func__ << "Abort: pimAlloc failed for obj1" << std::endl;
@@ -604,7 +633,7 @@ void maxPool(const std::vector<std::vector<int>> &inputMatrix, std::vector<int> 
   pimObjectList[0] = obj1;
   for (int i = 1; i < numRows; i++)
   {
-    PimObjId obj = pimAllocAssociated(pimObjectList[0], PIM_INT32);
+    PimObjId obj = pimAllocAssociated(pimObjectList[0], CONV_PIM_TYPE);
     if (obj == -1)
     {
       std::cout << "Function: " << __func__ << "Abort: pimAllocAssociated failed for obj at i=" << i << std::endl;
@@ -613,9 +642,14 @@ void maxPool(const std::vector<std::vector<int>> &inputMatrix, std::vector<int> 
     pimObjectList[i] = obj;
   }
 
+  std::vector<ConvHostType> row16(numCols, 0);
   for (uint64_t i = 0; i < pimObjectList.size(); i++)
   {
-    PimStatus status = pimCopyHostToDevice((void *)inputMatrix[i].data(), pimObjectList[i]);
+    for (int k = 0; k < numCols; ++k)
+    {
+      row16[k] = static_cast<ConvHostType>(inputMatrix[i][k]);
+    }
+    PimStatus status = pimCopyHostToDevice((void *)row16.data(), pimObjectList[i]);
     if (status != PIM_OK)
     {
       std::cout << "Function: " << __func__ << "Abort: pimCopyHostToDevice failed between inputMatrix and pimObjectList at i=" << i << std::endl;
@@ -633,11 +667,15 @@ void maxPool(const std::vector<std::vector<int>> &inputMatrix, std::vector<int> 
     }
   }
   outputMatrix.resize(numCols);
-  PimStatus status = pimCopyDeviceToHost(pimObjectList[0], outputMatrix.data());
+  PimStatus status = pimCopyDeviceToHost(pimObjectList[0], row16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << "Abort: pimCopyDeviceYoHost failed between pimObjectList[0] and outputMatrix" << std::endl;
     return;
+  }
+  for (int k = 0; k < numCols; ++k)
+  {
+    outputMatrix[k] = row16[k];
   }
   for (auto elem : pimObjectList)
   {
@@ -716,14 +754,14 @@ void pool(std::vector<std::vector<std::vector<int>>> &inputMatrix, int kernelHei
 // The accumulated results are then copied from the PIM (device) to the host.
 void gemv(uint64_t row, uint64_t col, std::vector<int> &srcVector, std::vector<std::vector<int>> &srcMatrix, std::vector<int> &dst)
 {
-  PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, row, PIM_INT32);
+  PimObjId srcObj = pimAlloc(PIM_ALLOC_AUTO, row, CONV_PIM_TYPE);
   if (srcObj == -1)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimAlloc failed for srcObj" << std::endl;
     return;
   }
 
-  PimObjId dstObj = pimAllocAssociated(srcObj, PIM_INT32);
+  PimObjId dstObj = pimAllocAssociated(srcObj, CONV_PIM_TYPE);
   if (dstObj == -1)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated failed for dstObj" << std::endl;
@@ -737,9 +775,14 @@ void gemv(uint64_t row, uint64_t col, std::vector<int> &srcVector, std::vector<s
     return;
   }
 
+  std::vector<ConvHostType> col16(row, 0);
   for (uint64_t i = 0; i < col; ++i)
   {
-    status = pimCopyHostToDevice((void *)srcMatrix[i].data(), srcObj);
+    for (uint64_t r = 0; r < row; ++r)
+    {
+      col16[r] = static_cast<ConvHostType>(srcMatrix[i][r]);
+    }
+    status = pimCopyHostToDevice((void *)col16.data(), srcObj);
     if (status != PIM_OK)
     {
       std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice failed between srcMatrix and srcObj at i=" << i << std::endl;
@@ -754,11 +797,16 @@ void gemv(uint64_t row, uint64_t col, std::vector<int> &srcVector, std::vector<s
     }
   }
 
-  dst.resize(row);
-  status = pimCopyDeviceToHost(dstObj, (void *)dst.data());
+  std::vector<ConvHostType> dst16(row, 0);
+  status = pimCopyDeviceToHost(dstObj, (void *)dst16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyDeviceToHost failed between dstObj and dst" << std::endl;
+  }
+  dst.resize(row);
+  for (uint64_t r = 0; r < row; ++r)
+  {
+    dst[r] = dst16[r];
   }
   pimFree(srcObj);
   pimFree(dstObj);
@@ -777,23 +825,28 @@ void performRelu(std::vector<int> &inputVector)
   int numCols = inputVector.size();
 
   // Initialize reluConst vector with zero for max(0, x) operation.
-  std::vector<int> reluConst(numCols, 0);
+  std::vector<ConvHostType> reluConst(numCols, 0);
+  std::vector<ConvHostType> in16(numCols, 0);
+  for (int k = 0; k < numCols; ++k)
+  {
+    in16[k] = static_cast<ConvHostType>(inputVector[k]);
+  }
 
-  PimObjId pimObject = pimAlloc(PIM_ALLOC_AUTO, numCols, PIM_INT32);
+  PimObjId pimObject = pimAlloc(PIM_ALLOC_AUTO, numCols, CONV_PIM_TYPE);
   if (pimObject == -1)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimAlloc for PimObj pimObject failed" << std::endl;
     return;
   }
 
-  PimObjId RELUConstObj = pimAllocAssociated(pimObject, PIM_INT32);
+  PimObjId RELUConstObj = pimAllocAssociated(pimObject, CONV_PIM_TYPE);
   if (RELUConstObj == -1)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated for PimObj RELUConstObj failed" << std::endl;
     return;
   }
 
-  PimStatus status = pimCopyHostToDevice((void *)inputVector.data(), pimObject);
+  PimStatus status = pimCopyHostToDevice((void *)in16.data(), pimObject);
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice from inputMatrix to pimObject failed" << std::endl;
@@ -815,11 +868,16 @@ void performRelu(std::vector<int> &inputVector)
   }
 
   inputVector.resize(numCols);
-  status = pimCopyDeviceToHost(pimObject, inputVector.data());
+  status = pimCopyDeviceToHost(pimObject, in16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyDeviceToHost from pimObject to outputMatrix" << std::endl;
     return;
+  }
+
+  for (int k = 0; k < numCols; ++k)
+  {
+    inputVector[k] = in16[k];
   }
 
   pimFree(pimObject);
@@ -839,10 +897,11 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
   int numRows = inputMatrix.size();
   int numCols = inputMatrix[0].size();
   // Initialize reluConst vector with zero for max(0, x) operation. Initialize with a different value 'y' for max(y, x) operation.
-  std::vector<int> reluConst(numCols, 0);
+  std::vector<ConvHostType> reluConst(numCols, 0);
+  std::vector<ConvHostType> row16(numCols, 0);
 
   std::vector<PimObjId> pimObjectList(numRows);
-  PimObjId obj1 = pimAlloc(PIM_ALLOC_AUTO, numCols, PIM_INT32);
+  PimObjId obj1 = pimAlloc(PIM_ALLOC_AUTO, numCols, CONV_PIM_TYPE);
   if (obj1 == -1)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimAlloc for PimObj obj1 failed" << std::endl;
@@ -851,7 +910,7 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
   pimObjectList[0] = obj1;
   for (int i = 1; i < numRows; i++)
   {
-    PimObjId obj = pimAllocAssociated(pimObjectList[0], PIM_INT32);
+    PimObjId obj = pimAllocAssociated(pimObjectList[0], CONV_PIM_TYPE);
     if (obj == -1)
     {
       std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated for PimObj obj failed" << std::endl;
@@ -859,7 +918,7 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
     }
     pimObjectList[i] = obj;
   }
-  PimObjId RELUConstObj = pimAllocAssociated(pimObjectList[0], PIM_INT32);
+  PimObjId RELUConstObj = pimAllocAssociated(pimObjectList[0], CONV_PIM_TYPE);
   if (RELUConstObj == -1)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimAllocAssociated for PimObj RELUConstObj failed" << std::endl;
@@ -868,7 +927,11 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
 
   for (uint64_t i = 0; i < pimObjectList.size(); i++)
   {
-    PimStatus status = pimCopyHostToDevice((void *)inputMatrix[i].data(), pimObjectList[i]);
+    for (int k = 0; k < numCols; ++k)
+    {
+      row16[k] = static_cast<ConvHostType>(inputMatrix[i][k]);
+    }
+    PimStatus status = pimCopyHostToDevice((void *)row16.data(), pimObjectList[i]);
     if (status != PIM_OK)
     {
       std::cout << "Function: " << __func__ << ", Abort: pimCopyHostToDevice from inputMatrix[" << i << "] to pimObjectList[" << i << "] failed" << std::endl;
@@ -892,11 +955,15 @@ void performRelu(const std::vector<std::vector<int>> &inputMatrix, std::vector<i
     }
   }
   outputMatrix.resize(numCols);
-  status = pimCopyDeviceToHost(pimObjectList[0], outputMatrix.data());
+  status = pimCopyDeviceToHost(pimObjectList[0], row16.data());
   if (status != PIM_OK)
   {
     std::cout << "Function: " << __func__ << ", Abort: pimCopyDeviceToHost from pimObjectList[0] to outputMatrix" << std::endl;
     return;
+  }
+  for (int k = 0; k < numCols; ++k)
+  {
+    outputMatrix[k] = row16[k];
   }
   for (auto elem : pimObjectList)
   {
@@ -931,7 +998,7 @@ void relu(std::vector<std::vector<std::vector<int>>> &inputMatrix)
   uint64_t inputWidth = inputMatrix[0][0].size();
 
   uint64_t numOfPIMRow = 1;
-  unsigned bitsPerElement = 32;
+  unsigned bitsPerElement = CONV_BITS;
   uint64_t numOfMatPerRow = std::min(static_cast<uint64_t>(std::floor((1.0 * numOfBits) / (inputHeight * inputWidth * bitsPerElement))), static_cast<uint64_t>(inputWidth));
 
   std::vector<std::vector<int>> decompMat;
