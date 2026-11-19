@@ -2,7 +2,7 @@
 //   Default (nothing defined)        : convolution path uses PIM_INT16 / int16_t  (int16 baseline experiment)
 //   Uncomment the next line (or compile with -DBASELINE_CONV_INT32) : convolution path uses PIM_INT32 / int32_t (original baseline)
 // Only performConv4D and aggregateConv follow the switch. ReLU, max pool, GEMV and softmax are always PIM_INT32.
-// #define BASELINE_CONV_INT32
+#define BASELINE_CONV_INT32
 
 // PIMeval Simulator - Application Utilities for Machine Learning Code.
 // The utilies for Conv, MaxPooling, RELU, GEMV are got from their respective cpp files. So, any change in the individual cpp file should also be updated here manually.
@@ -454,10 +454,11 @@ void performConv4D(const std::vector<std::vector<std::vector<int>>> &filter3D,
     return;
   }
 
-  PimStatus status = pimBroadcastInt(accObject, 0);
+  std::vector<ConvHostType> accZeros(numRequiredPIMCol, 0);
+  PimStatus status = pimCopyHostToDevice((void *)accZeros.data(), accObject);
   if (status != PIM_OK)
   {
-    std::cout << "Function: " << __func__ << " Abort: pimBroadcastInt failed for accObject" << std::endl;
+    std::cout << "Function: " << __func__ << " Abort: pimCopyHostToDevice failed for accObject" << std::endl;
     pimFree(accObject);
     return;
   }
